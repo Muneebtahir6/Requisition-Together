@@ -670,7 +670,7 @@ LOGIN_TEMPLATE = """
         </div>
       </div>
       <div class="brand-footer">
-        © <span id="year"></span> Muneeb. All rights reserved.
+        © <span id="year"></span> -Design and Develope by Muneeb. All rights reserved.
       </div>
     </div>
 
@@ -764,6 +764,9 @@ CREATE_REQUISITION_TEMPLATE = """
     .total-amount-container input {
       max-width: 150px;
     }
+    .navbar .container-fluid { position: relative; }
+    .navbar-center { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); }
+    .navbar-logo { height: 36px; }
   </style>
   <script>
     function addItemRow() {
@@ -833,6 +836,11 @@ CREATE_REQUISITION_TEMPLATE = """
 <nav class="navbar navbar-expand-lg navbar-dark bg-info">
   <div class="container-fluid">
     <a class="navbar-brand" href="{{ url_for('dashboard_redirect') }}">Together Requisition</a>
+
+    <div class="navbar-center">
+      <img src="{{ url_for('static', filename='logo.png') }}" class="navbar-logo" alt="TOGETHER Logo">
+    </div>
+
     <div class="d-flex">
       <span class="navbar-text me-3">Logged in as {{ user.username }} ({{ user.role.capitalize() }})</span>
       <a href="{{ url_for('logout') }}" class="btn btn-outline-light">Logout</a>
@@ -882,11 +890,9 @@ CREATE_REQUISITION_TEMPLATE = """
       </div>
       <div class="signature-block">
         <label class="signature-label" id="manager_signature_label">Verify/Manager Signature</label>
-        <!-- Image will appear after approval in the requisition view -->
       </div>
       <div class="signature-block">
         <label class="signature-label">CEO Signature</label>
-        <!-- Image will appear after CEO approval in the requisition view -->
       </div>
     </div>
 
@@ -924,11 +930,21 @@ EMPLOYEE_DASHBOARD_TEMPLATE = """
 <head>
   <title>Employee Dashboard - Together Requisition</title>
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+  <style>
+    .navbar .container-fluid { position: relative; }
+    .navbar-center { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); }
+    .navbar-logo { height: 36px; }
+  </style>
 </head>
 <body>
 <nav class="navbar navbar-expand-lg navbar-dark bg-info">
   <div class="container-fluid">
     <a class="navbar-brand" href="{{ url_for('dashboard_employee') }}">Together Requisition</a>
+
+    <div class="navbar-center">
+      <img src="{{ url_for('static', filename='logo.png') }}" class="navbar-logo" alt="TOGETHER Logo">
+    </div>
+
     <div class="d-flex">
       <span class="navbar-text me-3">Logged in as {{ user.username }} (Employee)</span>
       <a href="{{ url_for('create_requisition') }}" class="btn btn-success me-2">Create Requisition</a>
@@ -993,11 +1009,21 @@ MANAGER_DASHBOARD_TEMPLATE = """
 <head>
   <title>Manager Dashboard - Together Requisition</title>
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+  <style>
+    .navbar .container-fluid { position: relative; }
+    .navbar-center { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); }
+    .navbar-logo { height: 36px; }
+  </style>
 </head>
 <body>
 <nav class="navbar navbar-expand-lg navbar-dark bg-info">
   <div class="container-fluid">
     <a class="navbar-brand" href="{{ url_for('dashboard_manager') }}">Together Requisition</a>
+
+    <div class="navbar-center">
+      <img src="{{ url_for('static', filename='logo.png') }}" class="navbar-logo" alt="TOGETHER Logo">
+    </div>
+
     <div class="d-flex">
       <span class="navbar-text me-3">Logged in as {{ user.username }} (Manager)</span>
       <a href="{{ url_for('create_requisition') }}" class="btn btn-success me-2">Create Requisition</a>
@@ -1087,15 +1113,21 @@ COUNTRYHEAD_DASHBOARD_TEMPLATE = """
   <title>Countryhead Dashboard - Together Requisition</title>
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
   <style>
-    .badge {
-      font-size: 0.9em;
-    }
+    .badge { font-size: 0.9em; }
+    .navbar .container-fluid { position: relative; }
+    .navbar-center { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); }
+    .navbar-logo { height: 36px; }
   </style>
 </head>
 <body>
 <nav class="navbar navbar-expand-lg navbar-dark bg-info">
   <div class="container-fluid">
     <a class="navbar-brand" href="{{ url_for('dashboard_countryhead') }}">Together Requisition</a>
+
+    <div class="navbar-center">
+      <img src="{{ url_for('static', filename='logo.png') }}" class="navbar-logo" alt="TOGETHER Logo">
+    </div>
+
     <div class="d-flex">
       <span class="navbar-text me-3">Logged in as {{ user.username }} (Countryhead)</span>
       <a href="{{ url_for('countryhead_previous_requisitions') }}" class="btn btn-info me-2">Previous Requisitions</a>
@@ -1154,11 +1186,21 @@ COUNTRYHEAD_PREVIOUS_REQUISITIONS_TEMPLATE = """
 <head>
   <title>Countryhead Previous Requisitions - Together Requisition</title>
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+  <style>
+    .navbar .container-fluid { position: relative; }
+    .navbar-center { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); }
+    .navbar-logo { height: 36px; }
+  </style>
 </head>
 <body>
 <nav class="navbar navbar-expand-lg navbar-dark bg-info">
   <div class="container-fluid">
     <a class="navbar-brand" href="{{ url_for('dashboard_countryhead') }}">Together Requisition</a>
+
+    <div class="navbar-center">
+      <img src="{{ url_for('static', filename='logo.png') }}" class="navbar-logo" alt="TOGETHER Logo">
+    </div>
+
     <div class="d-flex">
       <span class="navbar-text me-3">Logged in as {{ user.username }} (Countryhead)</span>
       <a href="{{ url_for('dashboard_countryhead') }}" class="btn btn-secondary me-2">Dashboard</a>
@@ -1216,15 +1258,21 @@ CEO_DASHBOARD_TEMPLATE = """
   <title>CEO Dashboard - Together Requisition</title>
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
   <style>
-    .badge {
-      font-size: 0.9em;
-    }
+    .badge { font-size: 0.9em; }
+    .navbar .container-fluid { position: relative; }
+    .navbar-center { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); }
+    .navbar-logo { height: 36px; }
   </style>
 </head>
 <body>
 <nav class="navbar navbar-expand-lg navbar-dark bg-info">
   <div class="container-fluid">
     <a class="navbar-brand" href="{{ url_for('dashboard_ceo') }}">Together Requisition</a>
+
+    <div class="navbar-center">
+      <img src="{{ url_for('static', filename='logo.png') }}" class="navbar-logo" alt="TOGETHER Logo">
+    </div>
+
     <div class="d-flex">
       <span class="navbar-text me-3">Logged in as {{ user.username }} (CEO)</span>
       <a href="{{ url_for('previous_requisitions') }}" class="btn btn-info me-2">Previous Requisitions</a>
@@ -1322,11 +1370,21 @@ SUPERADMIN_REQUISITIONS_TEMPLATE = """
 <head>
   <title>All Requisitions - Superadmin - Together Requisition</title>
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+  <style>
+    .navbar .container-fluid { position: relative; }
+    .navbar-center { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); }
+    .navbar-logo { height: 36px; }
+  </style>
 </head>
 <body>
 <nav class="navbar navbar-expand-lg navbar-dark bg-info">
   <div class="container-fluid">
     <a class="navbar-brand" href="{{ url_for('dashboard_superadmin') }}">Together Requisition</a>
+
+    <div class="navbar-center">
+      <img src="{{ url_for('static', filename='logo.png') }}" class="navbar-logo" alt="TOGETHER Logo">
+    </div>
+
     <div class="d-flex">
       <span class="navbar-text me-3">Logged in as {{ user.username }} (Superadmin)</span>
       <a href="{{ url_for('dashboard_superadmin') }}" class="btn btn-secondary me-2">Dashboard</a>
@@ -1386,18 +1444,22 @@ SUPERADMIN_DASHBOARD_TEMPLATE = """
   <title>Superadmin Dashboard - Together Requisition</title>
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
   <style>
-    .form-inline > * {
-      margin-right: 10px;
-    }
-    .modal-backdrop.show {
-      opacity: 0.5;
-    }
+    .form-inline > * { margin-right: 10px; }
+    .modal-backdrop.show { opacity: 0.5; }
+    .navbar .container-fluid { position: relative; }
+    .navbar-center { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); }
+    .navbar-logo { height: 36px; }
   </style>
 </head>
 <body>
 <nav class="navbar navbar-expand-lg navbar-dark bg-info">
   <div class="container-fluid">
     <a class="navbar-brand" href="#">Together Requisition</a>
+
+    <div class="navbar-center">
+      <img src="{{ url_for('static', filename='logo.png') }}" class="navbar-logo" alt="TOGETHER Logo">
+    </div>
+
     <div class="d-flex">
       <span class="navbar-text me-3">Logged in as {{ user.username }} (Superadmin)</span>
       <a href="{{ url_for('superadmin_requisitions') }}" class="btn btn-info me-2">View All Requisitions</a>
@@ -1569,11 +1631,21 @@ PREVIOUS_REQUISITIONS_TEMPLATE = """
 <head>
   <title>Previous Requisitions - Together Requisition</title>
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+  <style>
+    .navbar .container-fluid { position: relative; }
+    .navbar-center { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); }
+    .navbar-logo { height: 36px; }
+  </style>
 </head>
 <body>
 <nav class="navbar navbar-expand-lg navbar-dark bg-info">
   <div class="container-fluid">
     <a class="navbar-brand" href="{{ url_for('dashboard_redirect') }}">Together Requisition</a>
+
+    <div class="navbar-center">
+      <img src="{{ url_for('static', filename='logo.png') }}" class="navbar-logo" alt="TOGETHER Logo">
+    </div>
+
     <div class="d-flex">
       <span class="navbar-text me-3">Logged in as {{ user.username }} ({{ user.role.capitalize() }})</span>
       <a href="{{ url_for('logout') }}" class="btn btn-outline-light">Logout</a>
@@ -1629,43 +1701,151 @@ VIEW_REQUISITION_TEMPLATE = """
   <title>View Requisition - Together Requisition</title>
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
   <style>
-    .table thead th, .table tbody td {
-      vertical-align: middle;
-      text-align: center;
+    /* Compact UI (screen) */
+    .compact { font-size: 0.95rem; }
+    .compact .table { font-size: 0.92rem; }
+    .compact .table th, .compact .table td { padding: .45rem; }
+    .compact .form-control { padding: 6px 10px; font-size: 0.92rem; }
+
+    /* Department on one line (screen) */
+    .department-row {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 10px;
     }
+    .department-row label { margin-bottom: 0; white-space: nowrap; }
+    .department-row .dept-input { max-width: 320px; }
+
+    /* Smaller signature boxes (screen) */
     .signatures-container {
       display: flex;
-      gap: 20px;
-      margin-top: 20px;
-      margin-bottom: 20px;
+      gap: 16px;
+      margin-top: 16px;
+      margin-bottom: 16px;
     }
     .signature-block {
       flex: 1;
       border: 1px solid #ccc;
-      padding: 10px;
-      min-height: 100px;
+      padding: 8px;
+      min-height: 70px;
       position: relative;
       text-align: center;
     }
     .signature-label {
-      font-weight: bold;
-      margin-bottom: 8px;
+      font-weight: 600;
+      margin-bottom: 6px;
       display: block;
+      font-size: 0.95rem;
     }
     .signature-img {
-      max-height: 100px;
+      max-height: 60px;
       max-width: 100%;
       object-fit: contain;
     }
-    .approval-form input[type="password"] {
-      margin-bottom: 10px;
+
+    /* Vendor + Phone one line (screen) */
+    .vm-row { display: flex; gap: 12px; }
+    .vm-row .vm-col { flex: 1; }
+
+    /* Smaller remarks (screen) */
+    #remarks { height: 70px; }
+
+    /* Header + navbar logo */
+    .table thead th, .table tbody td {
+      vertical-align: middle;
+      text-align: center;
+    }
+    .navbar .container-fluid { position: relative; }
+    .navbar-center { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); }
+    .navbar-logo { height: 36px; }
+
+    /* Print helpers (keep previous print setup) */
+    .print-only { display: none !important; }
+    .hide-on-print { } /* gets hidden in print */
+    .createdby-row { display: none; } /* show only in print */
+
+    @media (max-width: 576px) {
+      .department-row { flex-direction: column; align-items: stretch; }
+      .department-row .dept-input { max-width: 100%; }
+      .vm-row { flex-direction: column; }
+    }
+
+    @media print {
+      @page { margin: 12mm; }
+      * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+      body { font-size: 12px; }
+      /* Hide navbar in print */
+      nav.navbar { display: none !important; }
+
+      /* Show clean print header with logo + title */
+      .print-only { display: block !important; }
+
+      /* Smaller fonts for neat print */
+      h1, h2, h3, .form-label, label { font-size: 13px !important; }
+      .table, .form-control, .btn, .badge, .navbar-text, .signature-label { font-size: 12px !important; }
+
+      /* Hide actions and UI noise on print */
+      .hide-on-print { display: none !important; }
+      .approval-form { display: none !important; }
+
+      /* Vendor + Phone in one horizontal row (also print) */
+      .vm-row { display: flex; gap: 16px; }
+      .vm-row .vm-col { flex: 1; }
+
+      /* Screen header hidden; print title shown */
+      .screen-header { display: none !important; }
+      .print-header { text-align: center; margin-bottom: 8px; }
+      .print-header img { height: 52px; margin-bottom: 6px; }
+      .print-title { font-weight: 700; font-size: 16px; letter-spacing: 0.3px; }
+
+      /* Smaller remarks box in print */
+      #remarks { height: 60px !important; }
+
+      /* Show Created By (inline) instead of Department in print */
+      .department-row { display: none !important; }
+      .createdby-row { display: block !important; margin-bottom: 8px; }
+      .createdby-inline {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 13px;
+      }
+      .createdby-inline b { white-space: nowrap; }
+
+      /* Make signature boxes a little smaller in print */
+      .signature-block { min-height: 80px !important; padding: 8px !important; }
+      .signature-img { max-height: 70px !important; }
+
+      /* Footer: Logged in as ... */
+      .print-footer {
+        position: fixed;
+        bottom: 6mm;
+        left: 0; right: 0;
+        text-align: center;
+        font-size: 11px;
+        color: #555;
+      }
     }
   </style>
+  <script>
+    // Blank the document title during print to keep browser header clean
+    (function(){
+      var originalTitle = document.title;
+      window.onbeforeprint = function(){ document.title = ''; };
+      window.onafterprint  = function(){ document.title = originalTitle; };
+    })();
+  </script>
 </head>
 <body>
 <nav class="navbar navbar-expand-lg navbar-dark bg-info">
   <div class="container-fluid">
     <a class="navbar-brand" href="#">Together Requisition</a>
+
+    <div class="navbar-center">
+      <img src="{{ url_for('static', filename='logo.png') }}" class="navbar-logo" alt="TOGETHER Logo">
+    </div>
+
     <div class="d-flex">
       <span class="navbar-text me-3">Logged in as {{ user.username }} ({{ user.role.capitalize() }})</span>
       <a href="{{ url_for('dashboard_redirect') }}" class="btn btn-outline-light">Dashboard</a>
@@ -1673,12 +1853,31 @@ VIEW_REQUISITION_TEMPLATE = """
     </div>
   </div>
 </nav>
-<div class="container mt-4" style="max-width: 1000px;">
-  <h4 class="mb-3 text-white bg-info p-2 text-center">TOGETHER-REQUISITION</h4>
-  <div class="mb-3">
-    <label><b>Department Name:</b></label>
-    <input type="text" class="form-control" value="{{ req.department }}" readonly>
+
+<!-- Print-only header -->
+<div class="print-only print-header">
+  <img src="{{ url_for('static', filename='logo.png') }}" alt="TOGETHER Logo">
+  <div class="print-title">{{ req.department }} - Requisition</div>
+</div>
+
+<div class="container mt-4 compact" style="max-width: 1000px;">
+  <!-- Screen header (hidden in print) -->
+  <h4 class="mb-3 text-white bg-info p-2 text-center screen-header" style="font-size:1.1rem;">TOGETHER-REQUISITION</h4>
+
+  <!-- Screen: Department on one line -->
+  <div class="department-row">
+    <label><b>Department:</b></label>
+    <input type="text" class="form-control dept-input" value="{{ req.department }}" readonly>
   </div>
+
+  <!-- Print: Created By (inline, one row) -->
+  <div class="createdby-row print-only">
+    <div class="createdby-inline">
+      <b>Created By:</b>
+      <span>{{ req.created_by.username }}</span>
+    </div>
+  </div>
+
   <table class="table table-bordered" id="itemsTable">
     <thead class="table-light">
       <tr>
@@ -1703,9 +1902,10 @@ VIEW_REQUISITION_TEMPLATE = """
       {% endfor %}
     </tbody>
   </table>
-  <div class="d-flex justify-content-end align-items-center mb-3" style="background-color:#d6e6db; padding:10px;">
+
+  <div class="d-flex justify-content-end align-items-center mb-3" style="background-color:#d6e6db; padding:8px;">
     <b class="me-3">TOTAL</b>
-    <input type="number" class="form-control" style="max-width: 200px;" value="{{ "%.2f"|format(req.total_amount) }}" readonly>
+    <input type="number" class="form-control" style="max-width: 180px;" value="{{ "%.2f"|format(req.total_amount) }}" readonly>
   </div>
 
   <div class="signatures-container">
@@ -1741,20 +1941,25 @@ VIEW_REQUISITION_TEMPLATE = """
     </div>
   </div>
 
-  <div class="row mb-3">
-    <div class="col-md-6">
-      <label><b>Vendor details:</b></label>
-      <input type="text" class="form-control" value="{{ req.vendor_details or '-' }}" readonly>
+  <!-- Vendor + Phone one line -->
+  <div class="vm-row">
+    <div class="vm-col">
+      <div class="mb-2">
+        <label><b>Vendor details:</b></label>
+        <input type="text" class="form-control" value="{{ req.vendor_details or '-' }}" readonly>
+      </div>
     </div>
-    <div class="col-md-6">
-      <label><b>Phone:</b></label>
-      <input type="text" class="form-control" value="{{ req.phone or '-' }}" readonly>
+    <div class="vm-col">
+      <div class="mb-2">
+        <label><b>Phone:</b></label>
+        <input type="text" class="form-control" value="{{ req.phone or '-' }}" readonly>
+      </div>
     </div>
   </div>
 
-  <div class="mb-3">
+  <div class="mb-2">
     <label><b>Remarks:</b></label>
-    <textarea class="form-control" rows="3" readonly>{{ req.remarks or '' }}</textarea>
+    <textarea id="remarks" class="form-control" rows="3" readonly>{{ req.remarks or '' }}</textarea>
   </div>
 
   {% if (user.role == 'manager' and req.status == 'Pending Manager Approval' and req.department == user.department) or
@@ -1767,7 +1972,13 @@ VIEW_REQUISITION_TEMPLATE = """
   </form>
   {% endif %}
 
-  <button class="btn btn-secondary" onclick="window.print()">Print / Save as PDF</button>
+  <!-- Hide this button in print -->
+  <button class="btn btn-secondary hide-on-print" onclick="window.print()">Print / Save as PDF</button>
+
+  <!-- Print-only footer with user info -->
+  <div class="print-only print-footer">
+    Logged in as {{ user.username }} ({{ user.role.capitalize() }})
+  </div>
 </div>
 </body>
 </html>
