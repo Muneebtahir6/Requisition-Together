@@ -6,6 +6,7 @@ from datetime import datetime
 import pytz
 import json
 import os
+from sqlalchemy import func, text
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'your-secret-key'
@@ -25,12 +26,24 @@ class User(UserMixin, db.Model):
     role = db.Column(db.String(20))
     department = db.Column(db.String(100))
     signature_filename = db.Column(db.String(200))  # e.g. 'muneeb.png'
+    email = db.Column(db.String(255), unique=True, nullable=True)  # email field
 
     def set_password(self, password):
         self.password_hash = generate_password_hash(password)
 
     def check_password(self, password):
         return check_password_hash(self.password_hash, password)
+
+class AccountsBatch(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    created_by_id = db.Column(db.Integer, db.ForeignKey('user.id'))
+    created_at = db.Column(db.DateTime, default=lambda: datetime.now(PK_TZ))
+    total_amount = db.Column(db.Float, default=0.0)
+    items_json = db.Column(db.Text)  # aggregated items: dept, item_description, price, qty, total, req_id, date
+    requisition_ids = db.Column(db.Text)  # JSON list of requisition IDs
+    notes = db.Column(db.Text)
+
+    created_by = db.relationship('User')
 
 class Requisition(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -51,6 +64,10 @@ class Requisition(db.Model):
     decision_date = db.Column(db.DateTime)
     countryhead_approval_needed = db.Column(db.Boolean, default=False)
 
+    # For Accounts
+    accounts_status = db.Column(db.String(50))          # e.g., "New Requisition", "Merged"
+    accounts_batch_id = db.Column(db.Integer)           # link to AccountsBatch.id
+
     created_by = db.relationship('User', backref='requisitions')
 
 @login_manager.user_loader
@@ -67,7 +84,7 @@ def get_signature_path(user):
     """
     Resolve a user's signature image path relative to /static.
     Priority:
-      1) user.signature_filename (if it exists under static/signatures)
+      1) user.signature_filename (if exists under static/signatures)
       2) static/signatures/<username>.png (case-insensitive match)
     If found and user.signature_filename is empty/different, update it.
     Returns '' if not found.
@@ -77,11 +94,9 @@ def get_signature_path(user):
     static_folder = current_app.static_folder if current_app else app.static_folder
     candidates = []
 
-    # Candidate from DB
     if user.signature_filename:
         candidates.append(user.signature_filename.strip())
 
-    # Candidates derived from username
     if user.username:
         uname = user.username.strip()
         candidates.extend([f"{uname}.png", f"{uname.lower()}.png", f"{uname.upper()}.png"])
@@ -89,11 +104,10 @@ def get_signature_path(user):
     for name in candidates:
         if not name:
             continue
-        base = os.path.basename(name)  # prevent path traversal
+        base = os.path.basename(name)
         rel = f"signatures/{base}"
         abs_path = os.path.join(static_folder, rel)
         if os.path.exists(abs_path):
-            # Update stored filename if different
             if user.signature_filename != base:
                 try:
                     user.signature_filename = base
@@ -119,7 +133,9 @@ def debug_requisition(req_id):
     Claimed signature: {req.claimed_signature}<br>
     Manager signature: {req.manager_signature}<br>
     Countryhead signature: {req.countryhead_signature}<br>
-    CEO signature: {req.ceo_signature}
+    CEO signature: {req.ceo_signature}<br>
+    Accounts status: {req.accounts_status}<br>
+    Accounts batch id: {req.accounts_batch_id}
     """
 
 @app.route('/')
@@ -152,6 +168,10 @@ def logout():
 @app.route('/dashboard')
 @login_required
 def dashboard_redirect():
+    # Accounts department gets Accounts dashboard (no new role created)
+    if (current_user.department or '').strip().lower() == 'accounts':
+        return redirect(url_for('dashboard_accounts'))
+
     if current_user.role == 'employee':
         return redirect(url_for('dashboard_employee'))
     elif current_user.role == 'manager':
@@ -225,19 +245,6 @@ def dashboard_ceo():
     ).order_by(Requisition.created_at.desc()).all()
     return render_template_string(CEO_DASHBOARD_TEMPLATE, user=current_user, pending_reqs=pending_reqs, previous_reqs=previous_reqs, format_datetime_pk=format_datetime_pk)
 
-@app.route('/requisitions/previous')
-@login_required
-def previous_requisitions():
-    if current_user.role == 'ceo':
-        requisitions = Requisition.query.filter(
-            Requisition.status.in_(['Approved', 'Rejected'])
-        ).order_by(Requisition.created_at.desc()).all()
-    else:
-        requisitions = Requisition.query.filter_by(created_by_id=current_user.id).order_by(Requisition.created_at.desc()).all()
-    return render_template_string(PREVIOUS_REQUISITIONS_TEMPLATE, user=current_user, requisitions=requisitions, format_datetime_pk=format_datetime_pk)
-
-# ---------- Superadmin routes (fix for BuildError) ----------
-
 @app.route('/dashboard/superadmin', methods=['GET', 'POST'])
 @login_required
 def dashboard_superadmin():
@@ -247,65 +254,71 @@ def dashboard_superadmin():
 
     if request.method == 'POST':
         action = request.form.get('action')
-        try:
-            if action == 'create':
-                username = request.form.get('username', '').strip()
-                password = request.form.get('password', '').strip()
-                role = request.form.get('role', '').strip()
-                department = request.form.get('department', '').strip()
-                if not username or not password or not role:
-                    flash('Username, password, and role are required.', 'danger')
-                elif User.query.filter_by(username=username).first():
-                    flash('Username already exists.', 'danger')
-                else:
-                    u = User(username=username, role=role, department=department or '')
-                    u.set_password(password)
-                    db.session.add(u)
-                    db.session.commit()
-                    flash(f'User {username} created.', 'success')
 
-            elif action == 'delete':
-                user_id = int(request.form.get('user_id', 0))
-                u = User.query.get(user_id)
-                if not u:
-                    flash('User not found.', 'danger')
-                elif u.id == current_user.id:
-                    flash('You cannot delete yourself.', 'danger')
-                else:
-                    db.session.delete(u)
+        if action == 'create':
+            username = request.form['username'].strip()
+            password = request.form['password'].strip()
+            role = request.form['role'].strip()
+            department = request.form.get('department', '').strip()
+            email = request.form.get('email', '').strip()
+
+            if User.query.filter_by(username=username).first():
+                flash('Username already exists.', 'danger')
+            elif email and db.session.query(User.id).filter(func.lower(User.email) == email.lower()).first():
+                flash('Email already exists.', 'danger')
+            else:
+                u = User(username=username, role=role, department=department or None, email=email or None)
+                u.set_password(password)
+                db.session.add(u)
+                db.session.commit()
+                flash('User created.', 'success')
+
+        elif action == 'delete':
+            uid = int(request.form['user_id'])
+            if uid == current_user.id:
+                flash('You cannot delete yourself.', 'danger')
+            else:
+                user = User.query.get(uid)
+                if user:
+                    db.session.delete(user)
                     db.session.commit()
                     flash('User deleted.', 'success')
 
-            elif action == 'reset_password':
-                user_id = int(request.form.get('user_id', 0))
-                new_password = request.form.get('new_password', '').strip()
-                u = User.query.get(user_id)
-                if not u:
-                    flash('User not found.', 'danger')
-                elif not new_password:
-                    flash('New password is required.', 'danger')
-                else:
-                    u.set_password(new_password)
-                    db.session.commit()
-                    flash('Password reset.', 'success')
+        elif action == 'reset_password':
+            uid = int(request.form['user_id'])
+            new_password = request.form['new_password']
+            user = User.query.get(uid)
+            if user:
+                user.set_password(new_password)
+                db.session.commit()
+                flash('Password reset.', 'success')
 
-            elif action == 'rename':
-                user_id = int(request.form.get('user_id', 0))
-                new_username = request.form.get('new_username', '').strip()
-                u = User.query.get(user_id)
-                if not u:
-                    flash('User not found.', 'danger')
-                elif not new_username:
-                    flash('New username is required.', 'danger')
-                elif User.query.filter(User.username == new_username, User.id != user_id).first():
-                    flash('Username already in use.', 'danger')
-                else:
-                    u.username = new_username
+        elif action == 'rename':
+            uid = int(request.form['user_id'])
+            new_username = request.form['new_username'].strip()
+            if User.query.filter_by(username=new_username).first():
+                flash('Username already exists.', 'danger')
+            else:
+                user = User.query.get(uid)
+                if user:
+                    user.username = new_username
                     db.session.commit()
                     flash('Username updated.', 'success')
-        except Exception as e:
-            db.session.rollback()
-            flash('Operation failed.', 'danger')
+
+        elif action == 'update_email':
+            uid = int(request.form['user_id'])
+            new_email = request.form.get('new_email', '').strip()
+            if new_email and db.session.query(User.id).filter(func.lower(User.email) == new_email.lower(), User.id != uid).first():
+                flash('Email already in use.', 'danger')
+            else:
+                user = User.query.get(uid)
+                if user:
+                    user.email = new_email or None
+                    db.session.commit()
+                    flash('Email updated.', 'success')
+
+        else:
+            flash('Unknown action.', 'danger')
 
         return redirect(url_for('dashboard_superadmin'))
 
@@ -321,7 +334,16 @@ def superadmin_requisitions():
     requisitions = Requisition.query.order_by(Requisition.created_at.desc()).all()
     return render_template_string(SUPERADMIN_REQUISITIONS_TEMPLATE, user=current_user, requisitions=requisitions)
 
-# ---------- Create requisition ----------
+@app.route('/requisitions/previous')
+@login_required
+def previous_requisitions():
+    if current_user.role == 'ceo':
+        requisitions = Requisition.query.filter(
+            Requisition.status.in_(['Approved', 'Rejected'])
+        ).order_by(Requisition.created_at.desc()).all()
+    else:
+        requisitions = Requisition.query.filter_by(created_by_id=current_user.id).order_by(Requisition.created_at.desc()).all()
+    return render_template_string(PREVIOUS_REQUISITIONS_TEMPLATE, user=current_user, requisitions=requisitions, format_datetime_pk=format_datetime_pk)
 
 @app.route('/requisition/create', methods=['GET', 'POST'])
 @login_required
@@ -346,7 +368,7 @@ def create_requisition():
             except:
                 pass
 
-        claimed_signature = get_signature_path(current_user)  # auto-resolve signature path under static/signatures
+        claimed_signature = get_signature_path(current_user)
 
         manager_signature = ''
         countryhead_signature = ''
@@ -383,21 +405,32 @@ def create_requisition():
 @login_required
 def view_requisition(req_id):
     req = Requisition.query.get_or_404(req_id)
-    if current_user.role == 'employee' and req.created_by_id != current_user.id:
-        flash('Access denied.', 'danger')
-        return redirect(url_for('dashboard_redirect'))
-    if current_user.role == 'manager':
-        if req.created_by_id != current_user.id and req.department != current_user.department:
+
+    # Allow Accounts department users to view any requisition (read-only)
+    is_accounts = (current_user.department or '').strip().lower() == 'accounts'
+
+    if not is_accounts:
+        if current_user.role == 'employee' and req.created_by_id != current_user.id:
             flash('Access denied.', 'danger')
             return redirect(url_for('dashboard_redirect'))
+        if current_user.role == 'manager':
+            if req.created_by_id != current_user.id and req.department != current_user.department:
+                flash('Access denied.', 'danger')
+                return redirect(url_for('dashboard_redirect'))
+
     if request.method == 'POST':
+        # Accounts can view but not approve/reject
+        if is_accounts:
+            flash('Accounts cannot approve/reject this requisition.', 'danger')
+            return redirect(url_for('view_requisition', req_id=req_id))
+
         action = request.form['action']
         password = request.form['password']
         if not current_user.check_password(password):
             flash('Password incorrect.', 'danger')
             return redirect(url_for('view_requisition', req_id=req_id))
 
-        signature_path = get_signature_path(current_user)  # auto-resolve signature
+        signature_path = get_signature_path(current_user)
 
         if current_user.role == 'manager' and req.status == 'Pending Manager Approval' and req.department == current_user.department:
             if action == 'approve':
@@ -435,6 +468,8 @@ def view_requisition(req_id):
                 req.status = 'Approved'
                 req.ceo_signature = signature_path
                 req.decision_date = datetime.now(PK_TZ)
+                # Send to Accounts pipeline
+                req.accounts_status = 'New Requisition'
             elif action == 'reject':
                 req.status = 'Rejected'
                 req.ceo_signature = signature_path
@@ -449,7 +484,130 @@ def view_requisition(req_id):
 
     items = json.loads(req.items_json)
     return render_template_string(VIEW_REQUISITION_TEMPLATE, user=current_user, req=req, items=items, enumerate=enumerate)
-  
+
+# ACCOUNTS: dashboard available to any user whose department is Accounts
+@app.route('/dashboard/accounts', methods=['GET', 'POST'])
+@login_required
+def dashboard_accounts():
+    if (current_user.department or '').strip().lower() != 'accounts':
+        flash('Access denied.', 'danger')
+        return redirect(url_for('dashboard_redirect'))
+
+    if request.method == 'POST':
+        action = request.form.get('action')
+        if action == 'merge':
+            req_ids = request.form.getlist('req_ids')
+            if not req_ids:
+                flash('Please select at least one requisition to merge.', 'warning')
+                return redirect(url_for('dashboard_accounts'))
+            try:
+                ids = [int(x) for x in req_ids]
+            except:
+                flash('Invalid selection.', 'danger')
+                return redirect(url_for('dashboard_accounts'))
+
+            reqs = Requisition.query.filter(
+                Requisition.id.in_(ids),
+                Requisition.status == 'Approved',
+                (Requisition.accounts_batch_id.is_(None))
+            ).all()
+            if not reqs:
+                flash('No valid approved requisitions found in selection.', 'danger')
+                return redirect(url_for('dashboard_accounts'))
+
+            # Aggregate items
+            items = []
+            total_sum = 0.0
+            for r in reqs:
+                try:
+                    r_items = json.loads(r.items_json)
+                except Exception:
+                    r_items = []
+                for it in r_items:
+                    price = float(it.get('price', 0) or 0)
+                    qty = int(it.get('quantity', 0) or 0)
+                    t = float(it.get('total_price', price * qty) or 0)
+                    total_sum += t
+                    items.append({
+                        'req_id': r.id,
+                        'department': r.department,
+                        'date': it.get('date', ''),
+                        'item_description': it.get('item_description', ''),
+                        'price': price,
+                        'quantity': qty,
+                        'total_price': t
+                    })
+
+            batch = AccountsBatch(
+                created_by_id=current_user.id,
+                total_amount=total_sum,
+                items_json=json.dumps(items),
+                requisition_ids=json.dumps(ids),
+                notes=''
+            )
+            db.session.add(batch)
+            db.session.commit()
+
+            # Mark requisitions as merged and link to batch
+            for r in reqs:
+                r.accounts_status = 'Merged'
+                r.accounts_batch_id = batch.id
+            db.session.commit()
+
+            flash(f'Merged {len(reqs)} requisition(s) into batch #{batch.id}.', 'success')
+            return redirect(url_for('view_accounts_batch', batch_id=batch.id))
+
+    # Approved and not merged yet (show as "New Requisition")
+    new_reqs = Requisition.query.filter(
+        Requisition.status == 'Approved',
+        (Requisition.accounts_batch_id.is_(None))
+    ).order_by(Requisition.decision_date.desc().nullslast()).all()
+
+    batches = AccountsBatch.query.order_by(AccountsBatch.created_at.desc()).all()
+    return render_template_string(ACCOUNTS_DASHBOARD_TEMPLATE, user=current_user, new_reqs=new_reqs, batches=batches, format_datetime_pk=format_datetime_pk)
+
+@app.route('/accounts/batch/<int:batch_id>')
+@login_required
+def view_accounts_batch(batch_id):
+    # Allow Accounts dept, superadmin, CEO to view; others denied
+    allowed = (current_user.role in ['superadmin', 'ceo']) or ((current_user.department or '').strip().lower() == 'accounts')
+    if not allowed:
+        flash('Access denied.', 'danger')
+        return redirect(url_for('dashboard_redirect'))
+
+    batch = AccountsBatch.query.get_or_404(batch_id)
+    try:
+        items = json.loads(batch.items_json or '[]')
+    except Exception:
+        items = []
+    try:
+        req_ids = json.loads(batch.requisition_ids or '[]')
+    except Exception:
+        req_ids = []
+
+    # Per-requisition totals (show each requisition whole price)
+    req_summaries = []
+    if req_ids:
+        req_records = Requisition.query.filter(Requisition.id.in_(req_ids)).all()
+        for r in req_records:
+            req_summaries.append({
+                'id': r.id,
+                'department': r.department,
+                'employee': r.created_by.username if r.created_by else '-',
+                'total_amount': r.total_amount or 0.0
+            })
+
+    return render_template_string(
+        ACCOUNTS_BATCH_VIEW_TEMPLATE,
+        user=current_user,
+        batch=batch,
+        items=items,
+        req_ids=req_ids,
+        req_summaries=req_summaries,
+        enumerate=enumerate,
+        format_datetime_pk=format_datetime_pk  # ensure helper exists in Jinja
+    )
+
 # Templates (full content)
 
 LOGIN_TEMPLATE = """
@@ -633,16 +791,9 @@ LOGIN_TEMPLATE = """
     }
 
     @media (max-width: 900px) {
-      .auth-wrap {
-        grid-template-columns: 1fr;
-        width: min(560px, 94vw);
-      }
-      .brand-panel {
-        padding: 26px 24px;
-      }
-      .form-panel {
-        padding: 26px 24px;
-      }
+      .auth-wrap { grid-template-columns: 1fr; width: min(560px, 94vw); }
+      .brand-panel { padding: 26px 24px; }
+      .form-panel { padding: 26px 24px; }
       .brand-title h1 { font-size: 24px; }
       .brand-logo img { height: 48px; }
     }
@@ -650,7 +801,6 @@ LOGIN_TEMPLATE = """
 </head>
 <body>
   <div class="auth-wrap">
-    <!-- Brand / Left -->
     <div class="brand-panel">
       <div>
         <div class="brand-head">
@@ -666,15 +816,14 @@ LOGIN_TEMPLATE = """
         <div class="brand-bullets">
           <div class="item"><span class="dot"></span> Secure approvals workflow</div>
           <div class="item"><span class="dot"></span> Fast, simple, and reliable</div>
-          <div class="item"><span class="dot"></span> Designed for Our team</div>
+          <div class="item"><span class="dot"></span> Designed for your team</div>
         </div>
       </div>
       <div class="brand-footer">
-        © <span id="year"></span> -Design and Develope by Muneeb. All rights reserved.
+        © <span id="year"></span> TOGETHER. All rights reserved.
       </div>
     </div>
 
-    <!-- Form / Right -->
     <div class="form-panel">
       <div class="form-card">
         <h2>Welcome back</h2>
@@ -703,17 +852,13 @@ LOGIN_TEMPLATE = """
         </form>
       </div>
       <div class="text-center mt-3" style="color:#475569; font-size:12px;">
-        Need help? Contact Developer (muneeb@together.com.pk)
+        Need help? Contact Admin
       </div>
     </div>
   </div>
 
   <script>
-    // Set current year in footer
-    (function(){
-      var el = document.getElementById('year');
-      if (el) el.textContent = new Date().getFullYear();
-    })();
+    (function(){ var el = document.getElementById('year'); if (el) el.textContent = new Date().getFullYear(); })();
   </script>
 </body>
 </html>
@@ -767,6 +912,38 @@ CREATE_REQUISITION_TEMPLATE = """
     .navbar .container-fluid { position: relative; }
     .navbar-center { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); }
     .navbar-logo { height: 36px; }
+
+    .print-only { display: none !important; }
+    .hide-on-print { }
+
+    @media print {
+      @page { margin: 12mm; }
+      * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+      body { font-size: 12px; }
+      nav.navbar { display: none !important; }
+      .print-only { display: block !important; }
+      h1, h2, h3, .form-label, label { font-size: 13px !important; }
+      .table, .form-control, .btn, .badge, .navbar-text, .signature-label { font-size: 12px !important; }
+      .hide-on-print { display: none !important; }
+      #itemsTable th:last-child, #itemsTable td:last-child { display: none !important; }
+      #countryhead_check_container { display: none !important; }
+      .vm-row { display: flex; gap: 16px; }
+      .vm-row .vm-col { flex: 1; }
+      .page-title { display: none !important; }
+      .print-header { text-align: center; margin-bottom: 8px; }
+      .print-header img { height: 40px; margin-bottom: 4px; }
+      .print-title { font-weight: 700; font-size: 16px; letter-spacing: 0.3px; }
+      input, textarea, select { border: 1px solid #aaa !important; box-shadow: none !important; }
+      #remarks { height: 60px !important; }
+      .print-footer {
+        position: fixed;
+        bottom: 6mm;
+        left: 0; right: 0;
+        text-align: center;
+        font-size: 11px;
+        color: #555;
+      }
+    }
   </style>
   <script>
     function addItemRow() {
@@ -816,20 +993,16 @@ CREATE_REQUISITION_TEMPLATE = """
       document.getElementById('items_json').value = JSON.stringify(items);
       return true;
     }
-    window.onload = function() {
+
+    (function(){
+      var originalTitle = document.title;
+      window.onbeforeprint = function(){ document.title = ''; };
+      window.onafterprint  = function(){ document.title = originalTitle; };
+    })();
+
+    window.addEventListener('DOMContentLoaded', function(){
       addItemRow();
-      const checkbox = document.getElementById('countryhead_approval_needed');
-      if (checkbox) {
-        checkbox.addEventListener('change', function() {
-          const label = document.getElementById('manager_signature_label');
-          if (this.checked) {
-            label.textContent = 'Countryhead Signature';
-          } else {
-            label.textContent = 'Verify/Manager Signature';
-          }
-        });
-      }
-    }
+    });
   </script>
 </head>
 <body>
@@ -847,8 +1020,15 @@ CREATE_REQUISITION_TEMPLATE = """
     </div>
   </div>
 </nav>
+
+<div class="print-only print-header">
+  <img src="{{ url_for('static', filename='logo.png') }}" alt="TOGETHER Logo">
+  <div class="print-title">{{ user.department or '-' }} - Requisition</div>
+</div>
+
 <div class="container mt-4" style="max-width: 900px;">
-  <h3>Create Requisition</h3>
+  <h3 class="page-title">Create Requisition</h3>
+
   {% with messages = get_flashed_messages(with_categories=true) %}
     {% if messages %}
       {% for category, message in messages %}
@@ -857,7 +1037,7 @@ CREATE_REQUISITION_TEMPLATE = """
     {% endif %}
   {% endwith %}
   <form method="POST" onsubmit="return submitForm()">
-    <table class="table table-bordered">
+    <table class="table table-bordered" id="itemsTable">
       <thead class="table-light">
         <tr>
           <th>Date</th>
@@ -870,10 +1050,10 @@ CREATE_REQUISITION_TEMPLATE = """
       </thead>
       <tbody id="itemsBody"></tbody>
     </table>
-    <button type="button" class="btn btn-secondary mb-3" onclick="addItemRow()">+ Add More Row</button>
+    <button type="button" id="addRowBtn" class="btn btn-secondary mb-3 hide-on-print" onclick="addItemRow()">+ Add More Row</button>
 
     {% if user.role == 'manager' %}
-    <div class="form-check mb-3">
+    <div class="form-check mb-3" id="countryhead_check_container">
       <input class="form-check-input" type="checkbox" id="countryhead_approval_needed" name="countryhead_approval_needed">
       <label class="form-check-label" for="countryhead_approval_needed">
         Countryhead approval needed before CEO approval
@@ -896,13 +1076,19 @@ CREATE_REQUISITION_TEMPLATE = """
       </div>
     </div>
 
-    <div class="mb-3">
-      <label for="vendor_details" class="form-label">Vendor details</label>
-      <input type="text" class="form-control" id="vendor_details" name="vendor_details" placeholder="e.g. Mr. Abdullah - Shop no 49A, Hafeez Center, Lahore">
-    </div>
-    <div class="mb-3">
-      <label for="phone" class="form-label">Phone</label>
-      <input type="text" class="form-control" id="phone" name="phone" placeholder="0302-XXXXXXX">
+    <div class="vm-row">
+      <div class="vm-col">
+        <div class="mb-3">
+          <label for="vendor_details" class="form-label">Vendor details</label>
+          <input type="text" class="form-control" id="vendor_details" name="vendor_details" placeholder="e.g. Mr. Abdullah - Shop no 49A, Hafeez Center, Lahore">
+        </div>
+      </div>
+      <div class="vm-col">
+        <div class="mb-3">
+          <label for="phone" class="form-label">Phone</label>
+          <input type="text" class="form-control" id="phone" name="phone" placeholder="0302-XXXXXXX">
+        </div>
+      </div>
     </div>
 
     <div class="mb-3">
@@ -916,10 +1102,41 @@ CREATE_REQUISITION_TEMPLATE = """
     </div>
 
     <input type="hidden" id="items_json" name="items_json">
-    <button type="submit" class="btn btn-primary">Submit Requisition</button>
-    <button type="button" class="btn btn-secondary float-end" onclick="window.print()">Print / Save as PDF</button>
+    <button type="submit" id="submitBtn" class="btn btn-primary hide-on-print">Submit Requisition</button>
+    <button type="button" class="btn btn-secondary float-end hide-on-print" onclick="window.print()">Print / Save as PDF</button>
+
+    <div class="print-only print-footer">
+      Logged in as {{ user.username }} ({{ user.role.capitalize() }})
+    </div>
   </form>
 </div>
+
+<script>
+  (function(){
+    function updateSigLabel() {
+      var checkbox = document.getElementById('countryhead_approval_needed');
+      var labelEl  = document.getElementById('manager_signature_label');
+      if (!labelEl) return;
+      labelEl.textContent = (checkbox && checkbox.checked)
+        ? 'Countryhead Signature'
+        : 'Verify/Manager Signature';
+    }
+
+    document.addEventListener('DOMContentLoaded', function(){
+      updateSigLabel();
+      var checkbox = document.getElementById('countryhead_approval_needed');
+      if (checkbox) {
+        checkbox.addEventListener('change', updateSigLabel);
+        checkbox.addEventListener('input',  updateSigLabel);
+      }
+      window.addEventListener('beforeprint', updateSigLabel);
+      if (window.matchMedia) {
+        var mq = window.matchMedia('print');
+        if (mq && mq.addListener) mq.addListener(updateSigLabel);
+      }
+    });
+  })();
+</script>
 </body>
 </html>
 """
@@ -1268,11 +1485,9 @@ CEO_DASHBOARD_TEMPLATE = """
 <nav class="navbar navbar-expand-lg navbar-dark bg-info">
   <div class="container-fluid">
     <a class="navbar-brand" href="{{ url_for('dashboard_ceo') }}">Together Requisition</a>
-
     <div class="navbar-center">
       <img src="{{ url_for('static', filename='logo.png') }}" class="navbar-logo" alt="TOGETHER Logo">
     </div>
-
     <div class="d-flex">
       <span class="navbar-text me-3">Logged in as {{ user.username }} (CEO)</span>
       <a href="{{ url_for('previous_requisitions') }}" class="btn btn-info me-2">Previous Requisitions</a>
@@ -1486,6 +1701,9 @@ SUPERADMIN_DASHBOARD_TEMPLATE = """
         <input type="password" name="password" placeholder="Password" required class="form-control" autocomplete="new-password">
       </div>
       <div class="col-auto">
+        <input type="email" name="email" placeholder="Email (optional)" class="form-control" autocomplete="email">
+      </div>
+      <div class="col-auto">
         <select name="role" class="form-select" required>
           <option value="" disabled selected>Select Role</option>
           <option value="employee">Employee</option>
@@ -1519,6 +1737,7 @@ SUPERADMIN_DASHBOARD_TEMPLATE = """
       <tr>
         <th>ID</th>
         <th>Username</th>
+        <th>Email</th>
         <th>Role</th>
         <th>Department</th>
         <th>Actions</th>
@@ -1529,6 +1748,7 @@ SUPERADMIN_DASHBOARD_TEMPLATE = """
       <tr>
         <td>{{ u.id }}</td>
         <td>{{ u.username }}</td>
+        <td>{{ u.email or '-' }}</td>
         <td>{{ u.role }}</td>
         <td>{{ u.department or '-' }}</td>
         <td>
@@ -1539,6 +1759,7 @@ SUPERADMIN_DASHBOARD_TEMPLATE = """
           </form>
           <button class="btn btn-secondary btn-sm" onclick="showResetPassword({{ u.id }}, '{{ u.username }}')">Reset Password</button>
           <button class="btn btn-info btn-sm" onclick="showRenameUser({{ u.id }}, '{{ u.username }}')">Rename</button>
+          <button class="btn btn-warning btn-sm" onclick="showChangeEmail({{ u.id }}, {{ (u.email or '')|tojson }})">Change Email</button>
         </td>
       </tr>
       {% endfor %}
@@ -1546,7 +1767,6 @@ SUPERADMIN_DASHBOARD_TEMPLATE = """
   </table>
 </div>
 
-<!-- Reset Password Modal -->
 <div class="modal" tabindex="-1" id="resetPasswordModal">
   <div class="modal-dialog">
     <div class="modal-content">
@@ -1572,7 +1792,6 @@ SUPERADMIN_DASHBOARD_TEMPLATE = """
   </div>
 </div>
 
-<!-- Rename User Modal -->
 <div class="modal" tabindex="-1" id="renameUserModal">
   <div class="modal-dialog">
     <div class="modal-content">
@@ -1592,6 +1811,32 @@ SUPERADMIN_DASHBOARD_TEMPLATE = """
         <div class="modal-footer">
           <button type="submit" class="btn btn-primary">Rename</button>
           <button type="button" class="btn btn-secondary" onclick="hideRenameUser()">Cancel</button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+
+<div class="modal" tabindex="-1" id="changeEmailModal">
+  <div class="modal-dialog">
+    <div class="modal-content">
+      <form method="POST" id="changeEmailForm">
+        <div class="modal-header">
+          <h5 class="modal-title">Change Email</h5>
+          <button type="button" class="btn-close" aria-label="Close" onclick="hideChangeEmail()"></button>
+        </div>
+        <div class="modal-body">
+          <input type="hidden" name="action" value="update_email">
+          <input type="hidden" name="user_id" id="changeEmailUserId">
+          <div class="mb-3">
+            <label for="new_email" class="form-label">New Email</label>
+            <input type="email" name="new_email" id="new_email" class="form-control" placeholder="user@example.com">
+            <div class="form-text">Leave blank to clear the email.</div>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button type="submit" class="btn btn-primary">Save</button>
+          <button type="button" class="btn btn-secondary" onclick="hideChangeEmail()">Cancel</button>
         </div>
       </form>
     </div>
@@ -1619,12 +1864,23 @@ SUPERADMIN_DASHBOARD_TEMPLATE = """
     var modal = bootstrap.Modal.getInstance(document.getElementById('renameUserModal'));
     if(modal) modal.hide();
   }
+  function showChangeEmail(userId, email) {
+    document.getElementById('changeEmailUserId').value = userId;
+    document.getElementById('new_email').value = email || '';
+    var modal = new bootstrap.Modal(document.getElementById('changeEmailModal'));
+    modal.show();
+  }
+  function hideChangeEmail() {
+    var modal = bootstrap.Modal.getInstance(document.getElementById('changeEmailModal'));
+    if(modal) modal.hide();
+  }
 </script>
 
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
 </body>
 </html>
 """
+
 PREVIOUS_REQUISITIONS_TEMPLATE = """
 <!doctype html>
 <html lang="en">
@@ -1694,6 +1950,7 @@ PREVIOUS_REQUISITIONS_TEMPLATE = """
 </body>
 </html>
 """
+
 VIEW_REQUISITION_TEMPLATE = """
 <!doctype html>
 <html lang="en">
@@ -1701,13 +1958,11 @@ VIEW_REQUISITION_TEMPLATE = """
   <title>View Requisition - Together Requisition</title>
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
   <style>
-    /* Compact UI (screen) */
     .compact { font-size: 0.95rem; }
     .compact .table { font-size: 0.92rem; }
     .compact .table th, .compact .table td { padding: .45rem; }
     .compact .form-control { padding: 6px 10px; font-size: 0.92rem; }
 
-    /* Department on one line (screen) */
     .department-row {
       display: flex;
       align-items: center;
@@ -1717,7 +1972,6 @@ VIEW_REQUISITION_TEMPLATE = """
     .department-row label { margin-bottom: 0; white-space: nowrap; }
     .department-row .dept-input { max-width: 320px; }
 
-    /* Smaller signature boxes (screen) */
     .signatures-container {
       display: flex;
       gap: 16px;
@@ -1744,14 +1998,10 @@ VIEW_REQUISITION_TEMPLATE = """
       object-fit: contain;
     }
 
-    /* Vendor + Phone one line (screen) */
     .vm-row { display: flex; gap: 12px; }
     .vm-row .vm-col { flex: 1; }
-
-    /* Smaller remarks (screen) */
     #remarks { height: 70px; }
 
-    /* Header + navbar logo */
     .table thead th, .table tbody td {
       vertical-align: middle;
       text-align: center;
@@ -1760,10 +2010,9 @@ VIEW_REQUISITION_TEMPLATE = """
     .navbar-center { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); }
     .navbar-logo { height: 36px; }
 
-    /* Print helpers (keep previous print setup) */
     .print-only { display: none !important; }
-    .hide-on-print { } /* gets hidden in print */
-    .createdby-row { display: none; } /* show only in print */
+    .hide-on-print { }
+    .createdby-row { display: none; }
 
     @media (max-width: 576px) {
       .department-row { flex-direction: column; align-items: stretch; }
@@ -1775,34 +2024,26 @@ VIEW_REQUISITION_TEMPLATE = """
       @page { margin: 12mm; }
       * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
       body { font-size: 12px; }
-      /* Hide navbar in print */
-      nav.navbar { display: none !important; }
 
-      /* Show clean print header with logo + title */
+      nav.navbar { display: none !important; }
       .print-only { display: block !important; }
 
-      /* Smaller fonts for neat print */
       h1, h2, h3, .form-label, label { font-size: 13px !important; }
       .table, .form-control, .btn, .badge, .navbar-text, .signature-label { font-size: 12px !important; }
 
-      /* Hide actions and UI noise on print */
       .hide-on-print { display: none !important; }
       .approval-form { display: none !important; }
 
-      /* Vendor + Phone in one horizontal row (also print) */
       .vm-row { display: flex; gap: 16px; }
       .vm-row .vm-col { flex: 1; }
 
-      /* Screen header hidden; print title shown */
       .screen-header { display: none !important; }
       .print-header { text-align: center; margin-bottom: 8px; }
       .print-header img { height: 52px; margin-bottom: 6px; }
       .print-title { font-weight: 700; font-size: 16px; letter-spacing: 0.3px; }
 
-      /* Smaller remarks box in print */
       #remarks { height: 60px !important; }
 
-      /* Show Created By (inline) instead of Department in print */
       .department-row { display: none !important; }
       .createdby-row { display: block !important; margin-bottom: 8px; }
       .createdby-inline {
@@ -1813,11 +2054,28 @@ VIEW_REQUISITION_TEMPLATE = """
       }
       .createdby-inline b { white-space: nowrap; }
 
-      /* Make signature boxes a little smaller in print */
-      .signature-block { min-height: 80px !important; padding: 8px !important; }
+      .table { border-collapse: collapse !important; }
+      .table, .table th, .table td {
+        border: 1.2px solid #000 !important;
+      }
+      .table thead th {
+        background: #e9ecef !important;
+        color: #111827 !important;
+      }
+      .signature-block {
+        border: 1.2px solid #000 !important;
+        min-height: 80px !important;
+        padding: 8px !important;
+      }
       .signature-img { max-height: 70px !important; }
+      .form-control {
+        border: 1.2px solid #000 !important;
+        box-shadow: none !important;
+      }
+      div[style*="background-color:#d6e6db"] {
+        border: 1.2px solid #000 !important;
+      }
 
-      /* Footer: Logged in as ... */
       .print-footer {
         position: fixed;
         bottom: 6mm;
@@ -1829,7 +2087,6 @@ VIEW_REQUISITION_TEMPLATE = """
     }
   </style>
   <script>
-    // Blank the document title during print to keep browser header clean
     (function(){
       var originalTitle = document.title;
       window.onbeforeprint = function(){ document.title = ''; };
@@ -1854,23 +2111,19 @@ VIEW_REQUISITION_TEMPLATE = """
   </div>
 </nav>
 
-<!-- Print-only header -->
 <div class="print-only print-header">
   <img src="{{ url_for('static', filename='logo.png') }}" alt="TOGETHER Logo">
   <div class="print-title">{{ req.department }} - Requisition</div>
 </div>
 
 <div class="container mt-4 compact" style="max-width: 1000px;">
-  <!-- Screen header (hidden in print) -->
   <h4 class="mb-3 text-white bg-info p-2 text-center screen-header" style="font-size:1.1rem;">TOGETHER-REQUISITION</h4>
 
-  <!-- Screen: Department on one line -->
   <div class="department-row">
     <label><b>Department:</b></label>
     <input type="text" class="form-control dept-input" value="{{ req.department }}" readonly>
   </div>
 
-  <!-- Print: Created By (inline, one row) -->
   <div class="createdby-row print-only">
     <div class="createdby-inline">
       <b>Created By:</b>
@@ -1894,7 +2147,7 @@ VIEW_REQUISITION_TEMPLATE = """
       <tr>
         <td>{{ idx }}</td>
         <td>{{ item.date }}</td>
-        <td>{{ item.item_description }}</td>
+        <td style="text-align:left;">{{ item.item_description }}</td>
         <td>{{ "%.2f"|format(item.price) }}</td>
         <td>{{ item.quantity }}</td>
         <td>{{ "%.2f"|format(item.total_price) }}</td>
@@ -1941,7 +2194,6 @@ VIEW_REQUISITION_TEMPLATE = """
     </div>
   </div>
 
-  <!-- Vendor + Phone one line -->
   <div class="vm-row">
     <div class="vm-col">
       <div class="mb-2">
@@ -1972,10 +2224,8 @@ VIEW_REQUISITION_TEMPLATE = """
   </form>
   {% endif %}
 
-  <!-- Hide this button in print -->
   <button class="btn btn-secondary hide-on-print" onclick="window.print()">Print / Save as PDF</button>
 
-  <!-- Print-only footer with user info -->
   <div class="print-only print-footer">
     Logged in as {{ user.username }} ({{ user.role.capitalize() }})
   </div>
@@ -1984,13 +2234,261 @@ VIEW_REQUISITION_TEMPLATE = """
 </html>
 """
 
+ACCOUNTS_DASHBOARD_TEMPLATE = """
+<!doctype html>
+<html lang="en">
+<head>
+  <title>Accounts - Together Requisition</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+  <style>
+    .navbar .container-fluid { position: relative; }
+    .navbar-center { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); }
+    .navbar-logo { height: 36px; }
+    .small-text { font-size: 0.92rem; }
+  </style>
+</head>
+<body>
+<nav class="navbar navbar-expand-lg navbar-dark bg-info">
+  <div class="container-fluid">
+    <a class="navbar-brand" href="{{ url_for('dashboard_accounts') }}">Together Requisition</a>
+    <div class="navbar-center">
+      <img src="{{ url_for('static', filename='logo.png') }}" class="navbar-logo" alt="TOGETHER Logo">
+    </div>
+    <div class="d-flex">
+      <span class="navbar-text me-3">Logged in as {{ user.username }} ({{ user.department }})</span>
+      <a href="{{ url_for('logout') }}" class="btn btn-outline-light">Logout</a>
+    </div>
+  </div>
+</nav>
+
+<div class="container mt-4">
+  {% with messages = get_flashed_messages(with_categories=true) %}
+    {% if messages %}
+      {% for category, message in messages %}
+        <div class="alert alert-{{category}}">{{ message }}</div>
+      {% endfor %}
+    {% endif %}
+  {% endwith %}
+
+  <h4>New Approved Requisitions (to merge)</h4>
+  {% if new_reqs %}
+  <form method="POST" class="mb-4">
+    <input type="hidden" name="action" value="merge">
+    <table class="table table-bordered table-hover small-text">
+      <thead class="table-light">
+        <tr>
+          <th><input type="checkbox" id="select_all" onclick="toggleAll(this)"></th>
+          <th>ID</th>
+          <th>Department</th>
+          <th>Employee</th>
+          <th>Status</th>
+          <th>Total Amount</th>
+          <th>Approved On</th>
+          <th>View</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for r in new_reqs %}
+        <tr>
+          <td><input type="checkbox" name="req_ids" value="{{ r.id }}"></td>
+          <td>{{ r.id }}</td>
+          <td>{{ r.department }}</td>
+          <td>{{ r.created_by.username }}</td>
+          <td><span class="badge bg-primary">New Requisition</span></td>
+          <td>{{ "%.2f"|format(r.total_amount) }}</td>
+          <td>{{ r.decision_date.strftime('%d/%m/%Y %H:%M') if r.decision_date else '-' }}</td>
+          <td><a href="{{ url_for('view_requisition', req_id=r.id) }}" class="btn btn-sm btn-outline-primary">View</a></td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    <button type="submit" class="btn btn-primary">Merge Selected</button>
+  </form>
+  {% else %}
+    <p>No new approved requisitions to merge.</p>
+  {% endif %}
+
+  <h4>Merged Batches</h4>
+  {% if batches %}
+  <table class="table table-bordered table-hover small-text">
+    <thead class="table-light">
+      <tr>
+        <th>Batch #</th>
+        <th>Created By</th>
+        <th>Created At</th>
+        <th>Total Amount</th>
+        <th>View</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for b in batches %}
+      <tr>
+        <td>{{ b.id }}</td>
+        <td>{{ b.created_by.username if b.created_by else '-' }}</td>
+        <td>{{ format_datetime_pk(b.created_at) }}</td>
+        <td>{{ "%.2f"|format(b.total_amount) }}</td>
+        <td><a href="{{ url_for('view_accounts_batch', batch_id=b.id) }}" class="btn btn-sm btn-outline-primary">View</a></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+    <p>No merged batches yet.</p>
+  {% endif %}
+</div>
+
+<script>
+  function toggleAll(master){
+    document.querySelectorAll('input[name="req_ids"]').forEach(cb => cb.checked = master.checked);
+  }
+</script>
+</body>
+</html>
+"""
+
+ACCOUNTS_BATCH_VIEW_TEMPLATE = """
+<!doctype html>
+<html lang="en">
+<head>
+  <title>Accounts Batch - Together Requisition</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+  <style>
+    .navbar .container-fluid { position: relative; }
+    .navbar-center { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); }
+    .navbar-logo { height: 36px; }
+    .table thead th, .table tbody td { vertical-align: middle; text-align: center; }
+    .total-strip { background-color:#d6e6db; padding:8px; }
+
+    @media print {
+      @page { margin: 12mm; }
+      nav.navbar { display:none !important; }
+      .print-header { text-align:center; margin-bottom:10px; }
+      .print-header img { height:52px; margin-bottom:6px; }
+      .table { border-collapse: collapse !important; }
+      .table, .table th, .table td { border: 1.2px solid #000 !important; }
+      .table thead th { background: #e9ecef !important; color:#111827 !important; }
+      .total-strip { border: 1.2px solid #000 !important; }
+    }
+  </style>
+</head>
+<body>
+<nav class="navbar navbar-expand-lg navbar-dark bg-info">
+  <div class="container-fluid">
+    <a class="navbar-brand" href="{{ url_for('dashboard_accounts') }}">Together Requisition</a>
+    <div class="navbar-center">
+      <img src="{{ url_for('static', filename='logo.png') }}" class="navbar-logo" alt="TOGETHER Logo">
+    </div>
+    <div class="d-flex">
+      <span class="navbar-text me-3">Logged in as {{ user.username }} ({{ user.role.capitalize() }})</span>
+      <a href="{{ url_for('dashboard_accounts') }}" class="btn btn-outline-light">Dashboard</a>
+      <a href="{{ url_for('logout') }}" class="btn btn-outline-light ms-2">Logout</a>
+    </div>
+  </div>
+</nav>
+
+<div class="container mt-4" style="max-width: 1100px;">
+  <div class="print-header">
+    <img src="{{ url_for('static', filename='logo.png') }}" alt="TOGETHER Logo">
+    <div style="font-weight:700; font-size: 16px;">Accounts Batch #{{ batch.id }}</div>
+  </div>
+
+  <div class="row mb-3">
+    <div class="col-md-4"><b>Batch #:</b> {{ batch.id }}</div>
+    <div class="col-md-4"><b>Created By:</b> {{ batch.created_by.username if batch.created_by else '-' }}</div>
+    <div class="col-md-4"><b>Created At:</b> {{ format_datetime_pk(batch.created_at) }}</div>
+  </div>
+
+  <h6>Items (all selected requisitions)</h6>
+  <table class="table table-bordered">
+    <thead class="table-light">
+      <tr>
+        <th>Sr.No</th>
+        <th>Req ID</th>
+        <th>Department</th>
+        <th>Date</th>
+        <th>Item Description</th>
+        <th>Price</th>
+        <th>Qty</th>
+        <th>Total</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for idx, it in enumerate(items, 1) %}
+      <tr>
+        <td>{{ idx }}</td>
+        <td>{{ it.req_id }}</td>
+        <td>{{ it.department }}</td>
+        <td>{{ it.date }}</td>
+        <td style="text-align:left;">{{ it.item_description }}</td>
+        <td>{{ "%.2f"|format(it.price) }}</td>
+        <td>{{ it.quantity }}</td>
+        <td>{{ "%.2f"|format(it.total_price) }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  <div class="d-flex justify-content-end align-items-center mb-3 total-strip">
+    <b class="me-3">BATCH TOTAL</b>
+    <input type="text" class="form-control" style="max-width: 220px;" value="{{ "%.2f"|format(batch.total_amount) }}" readonly>
+  </div>
+
+  <h6>Requisition Totals</h6>
+  <table class="table table-bordered">
+    <thead class="table-light">
+      <tr>
+        <th>Req ID</th>
+        <th>Department</th>
+        <th>Employee</th>
+        <th>Requisition Total</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for r in req_summaries %}
+      <tr>
+        <td>{{ r.id }}</td>
+        <td>{{ r.department }}</td>
+        <td>{{ r.employee }}</td>
+        <td>{{ "%.2f"|format(r.total_amount) }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  <button class="btn btn-secondary" onclick="window.print()">Print / Save as PDF</button>
+</div>
+</body>
+</html>
+"""
+
 if __name__ == '__main__':
     with app.app_context():
         db.create_all()
+
+        # Lightweight migrations for added columns (SQLite safe)
+        try:
+            user_cols = [row[1] for row in db.session.execute(text("PRAGMA table_info(user)"))]
+            if 'email' not in user_cols:
+                db.session.execute(text("ALTER TABLE user ADD COLUMN email VARCHAR(255)"))
+                db.session.commit()
+        except Exception as e:
+            print("Email column migration check failed:", e)
+
+        try:
+            req_cols = [row[1] for row in db.session.execute(text("PRAGMA table_info(requisition)"))]
+            if 'accounts_status' not in req_cols:
+                db.session.execute(text("ALTER TABLE requisition ADD COLUMN accounts_status VARCHAR(50)"))
+            if 'accounts_batch_id' not in req_cols:
+                db.session.execute(text("ALTER TABLE requisition ADD COLUMN accounts_batch_id INTEGER"))
+            db.session.commit()
+        except Exception as e:
+            print("Requisition accounts columns migration check failed:", e)
+
         if not User.query.filter_by(role='superadmin').first():
             sa = User(username='superadmin', role='superadmin', department='')
             sa.set_password('superadmin')
             db.session.add(sa)
             db.session.commit()
             print("Created default superadmin with username 'superadmin' and password 'superadmin'")
+
     app.run(debug=True)
