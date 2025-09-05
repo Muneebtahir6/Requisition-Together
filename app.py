@@ -1,10 +1,11 @@
-from flask import Flask, render_template_string, request, redirect, url_for, flash
+from flask import Flask, render_template_string, request, redirect, url_for, flash, current_app
 from flask_sqlalchemy import SQLAlchemy
 from flask_login import LoginManager, UserMixin, login_user, login_required, logout_user, current_user
 from werkzeug.security import generate_password_hash, check_password_hash
 from datetime import datetime
 import pytz
 import json
+import os
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'your-secret-key'
@@ -23,7 +24,7 @@ class User(UserMixin, db.Model):
     password_hash = db.Column(db.String(150))
     role = db.Column(db.String(20))
     department = db.Column(db.String(100))
-    signature_filename = db.Column(db.String(200))
+    signature_filename = db.Column(db.String(200))  # e.g. 'muneeb.png'
 
     def set_password(self, password):
         self.password_hash = generate_password_hash(password)
@@ -37,9 +38,10 @@ class Requisition(db.Model):
     department = db.Column(db.String(100))
     items_json = db.Column(db.Text)
     total_amount = db.Column(db.Float)
-    status = db.Column(db.String(20), default='Pending Manager Approval')
-    claimed_signature = db.Column(db.Text)
+    status = db.Column(db.String(30), default='Pending Manager Approval')
+    claimed_signature = db.Column(db.Text)  # creator's signature path or empty string
     manager_signature = db.Column(db.String(200))
+    countryhead_signature = db.Column(db.String(200))
     ceo_signature = db.Column(db.String(200))
     vendor_details = db.Column(db.String(300))
     phone = db.Column(db.String(50))
@@ -47,6 +49,7 @@ class Requisition(db.Model):
     created_at = db.Column(db.DateTime, default=lambda: datetime.now(PK_TZ))
     pending_date = db.Column(db.DateTime)
     decision_date = db.Column(db.DateTime)
+    countryhead_approval_needed = db.Column(db.Boolean, default=False)
 
     created_by = db.relationship('User', backref='requisitions')
 
@@ -59,6 +62,65 @@ def format_datetime_pk(dt):
         return '-'
     dt_pk = dt.astimezone(PK_TZ)
     return dt_pk.strftime('%d/%m/%Y %H:%M')
+
+def get_signature_path(user):
+    """
+    Resolve a user's signature image path relative to /static.
+    Priority:
+      1) user.signature_filename (if it exists under static/signatures)
+      2) static/signatures/<username>.png (case-insensitive match)
+    If found and user.signature_filename is empty/different, update it.
+    Returns '' if not found.
+    """
+    if not user:
+        return ''
+    static_folder = current_app.static_folder if current_app else app.static_folder
+    candidates = []
+
+    # Candidate from DB
+    if user.signature_filename:
+        candidates.append(user.signature_filename.strip())
+
+    # Candidates derived from username
+    if user.username:
+        uname = user.username.strip()
+        candidates.extend([f"{uname}.png", f"{uname.lower()}.png", f"{uname.upper()}.png"])
+
+    for name in candidates:
+        if not name:
+            continue
+        base = os.path.basename(name)  # prevent path traversal
+        rel = f"signatures/{base}"
+        abs_path = os.path.join(static_folder, rel)
+        if os.path.exists(abs_path):
+            # Update stored filename if different
+            if user.signature_filename != base:
+                try:
+                    user.signature_filename = base
+                    db.session.commit()
+                except Exception:
+                    db.session.rollback()
+            return rel
+    return ''
+
+# Debug routes
+@app.route('/debug/signature-filename')
+@login_required
+def debug_signature_filename():
+    return f"User: {current_user.username}, Signature filename: {current_user.signature_filename}"
+
+@app.route('/debug/requisition/<int:req_id>')
+@login_required
+def debug_requisition(req_id):
+    req = Requisition.query.get(req_id)
+    if not req:
+        return "Requisition not found"
+    return f"""
+    Claimed signature: {req.claimed_signature}<br>
+    Manager signature: {req.manager_signature}<br>
+    Countryhead signature: {req.countryhead_signature}<br>
+    CEO signature: {req.ceo_signature}
+    """
 
 @app.route('/')
 def home():
@@ -94,6 +156,8 @@ def dashboard_redirect():
         return redirect(url_for('dashboard_employee'))
     elif current_user.role == 'manager':
         return redirect(url_for('dashboard_manager'))
+    elif current_user.role == 'countryhead':
+        return redirect(url_for('dashboard_countryhead'))
     elif current_user.role == 'ceo':
         return redirect(url_for('dashboard_ceo'))
     elif current_user.role == 'superadmin':
@@ -124,6 +188,31 @@ def dashboard_manager():
     ).order_by(Requisition.created_at.desc()).all()
     return render_template_string(MANAGER_DASHBOARD_TEMPLATE, user=current_user, pending_reqs=pending_reqs, previous_reqs=previous_reqs, format_datetime_pk=format_datetime_pk)
 
+@app.route('/dashboard/countryhead')
+@login_required
+def dashboard_countryhead():
+    if current_user.role != 'countryhead':
+        flash('Access denied.', 'danger')
+        return redirect(url_for('dashboard_redirect'))
+    pending_reqs = Requisition.query.filter_by(status='Pending Countryhead Approval', countryhead_approval_needed=True).all()
+    previous_reqs = Requisition.query.filter(
+        Requisition.countryhead_approval_needed == True,
+        Requisition.status.in_(['Approved', 'Rejected'])
+    ).order_by(Requisition.created_at.desc()).all()
+    return render_template_string(COUNTRYHEAD_DASHBOARD_TEMPLATE, user=current_user, pending_reqs=pending_reqs, previous_reqs=previous_reqs, format_datetime_pk=format_datetime_pk)
+
+@app.route('/dashboard/countryhead/previous')
+@login_required
+def countryhead_previous_requisitions():
+    if current_user.role != 'countryhead':
+        flash('Access denied.', 'danger')
+        return redirect(url_for('dashboard_redirect'))
+    requisitions = Requisition.query.filter(
+        Requisition.countryhead_approval_needed == True,
+        Requisition.status.in_(['Approved', 'Rejected'])
+    ).order_by(Requisition.created_at.desc()).all()
+    return render_template_string(COUNTRYHEAD_PREVIOUS_REQUISITIONS_TEMPLATE, user=current_user, requisitions=requisitions, format_datetime_pk=format_datetime_pk)
+
 @app.route('/dashboard/ceo')
 @login_required
 def dashboard_ceo():
@@ -147,69 +236,92 @@ def previous_requisitions():
         requisitions = Requisition.query.filter_by(created_by_id=current_user.id).order_by(Requisition.created_at.desc()).all()
     return render_template_string(PREVIOUS_REQUISITIONS_TEMPLATE, user=current_user, requisitions=requisitions, format_datetime_pk=format_datetime_pk)
 
+# ---------- Superadmin routes (fix for BuildError) ----------
+
 @app.route('/dashboard/superadmin', methods=['GET', 'POST'])
 @login_required
 def dashboard_superadmin():
     if current_user.role != 'superadmin':
         flash('Access denied.', 'danger')
         return redirect(url_for('dashboard_redirect'))
-    users = User.query.all()
-    requisitions = Requisition.query.order_by(Requisition.created_at.desc()).all()
+
     if request.method == 'POST':
-        action = request.form['action']
-        if action == 'create':
-            username = request.form['username']
-            password = request.form['password']
-            role = request.form['role']
-            department = request.form.get('department', '')
-            if User.query.filter_by(username=username).first():
-                flash('Username already exists.', 'danger')
-            else:
-                new_user = User(username=username, role=role, department=department)
-                new_user.set_password(password)
-                db.session.add(new_user)
-                db.session.commit()
-                flash('User created.', 'success')
-        elif action == 'delete':
-            user_id = int(request.form['user_id'])
-            if user_id == current_user.id:
-                flash('Cannot delete yourself.', 'danger')
-            else:
-                user = User.query.get(user_id)
-                if user:
-                    db.session.delete(user)
+        action = request.form.get('action')
+        try:
+            if action == 'create':
+                username = request.form.get('username', '').strip()
+                password = request.form.get('password', '').strip()
+                role = request.form.get('role', '').strip()
+                department = request.form.get('department', '').strip()
+                if not username or not password or not role:
+                    flash('Username, password, and role are required.', 'danger')
+                elif User.query.filter_by(username=username).first():
+                    flash('Username already exists.', 'danger')
+                else:
+                    u = User(username=username, role=role, department=department or '')
+                    u.set_password(password)
+                    db.session.add(u)
+                    db.session.commit()
+                    flash(f'User {username} created.', 'success')
+
+            elif action == 'delete':
+                user_id = int(request.form.get('user_id', 0))
+                u = User.query.get(user_id)
+                if not u:
+                    flash('User not found.', 'danger')
+                elif u.id == current_user.id:
+                    flash('You cannot delete yourself.', 'danger')
+                else:
+                    db.session.delete(u)
                     db.session.commit()
                     flash('User deleted.', 'success')
-        elif action == 'reset_password':
-            user_id = int(request.form['user_id'])
-            new_password = request.form['new_password']
-            user = User.query.get(user_id)
-            if user:
-                user.set_password(new_password)
-                db.session.commit()
-                flash('Password reset.', 'success')
-        elif action == 'rename':
-            user_id = int(request.form['user_id'])
-            new_username = request.form['new_username']
-            if User.query.filter_by(username=new_username).first():
-                flash('Username already exists.', 'danger')
-            else:
-                user = User.query.get(user_id)
-                if user:
-                    user.username = new_username
-                    db.session.commit()
-                    flash('Username changed.', 'success')
-        return redirect(url_for('dashboard_superadmin'))
-    return render_template_string(SUPERADMIN_DASHBOARD_TEMPLATE, user=current_user, users=users, requisitions=requisitions)
 
-@app.route('/dashboard/superadmin/requisitions')
+            elif action == 'reset_password':
+                user_id = int(request.form.get('user_id', 0))
+                new_password = request.form.get('new_password', '').strip()
+                u = User.query.get(user_id)
+                if not u:
+                    flash('User not found.', 'danger')
+                elif not new_password:
+                    flash('New password is required.', 'danger')
+                else:
+                    u.set_password(new_password)
+                    db.session.commit()
+                    flash('Password reset.', 'success')
+
+            elif action == 'rename':
+                user_id = int(request.form.get('user_id', 0))
+                new_username = request.form.get('new_username', '').strip()
+                u = User.query.get(user_id)
+                if not u:
+                    flash('User not found.', 'danger')
+                elif not new_username:
+                    flash('New username is required.', 'danger')
+                elif User.query.filter(User.username == new_username, User.id != user_id).first():
+                    flash('Username already in use.', 'danger')
+                else:
+                    u.username = new_username
+                    db.session.commit()
+                    flash('Username updated.', 'success')
+        except Exception as e:
+            db.session.rollback()
+            flash('Operation failed.', 'danger')
+
+        return redirect(url_for('dashboard_superadmin'))
+
+    users = User.query.order_by(User.id.asc()).all()
+    return render_template_string(SUPERADMIN_DASHBOARD_TEMPLATE, user=current_user, users=users)
+
+@app.route('/superadmin/requisitions')
 @login_required
 def superadmin_requisitions():
     if current_user.role != 'superadmin':
         flash('Access denied.', 'danger')
         return redirect(url_for('dashboard_redirect'))
     requisitions = Requisition.query.order_by(Requisition.created_at.desc()).all()
-    return render_template_string(SUPERADMIN_REQUISITIONS_TEMPLATE, user=current_user, requisitions=requisitions, format_datetime_pk=format_datetime_pk)
+    return render_template_string(SUPERADMIN_REQUISITIONS_TEMPLATE, user=current_user, requisitions=requisitions)
+
+# ---------- Create requisition ----------
 
 @app.route('/requisition/create', methods=['GET', 'POST'])
 @login_required
@@ -223,6 +335,7 @@ def create_requisition():
             vendor_details = request.form.get('vendor_details', '')
             phone = request.form.get('phone', '')
             remarks = request.form.get('remarks', '')
+            countryhead_approval_needed = request.form.get('countryhead_approval_needed') == 'on'
         except Exception:
             flash('Invalid form data.', 'danger')
             return redirect(url_for('create_requisition'))
@@ -232,30 +345,39 @@ def create_requisition():
                 total_amount += float(item.get('total_price', 0))
             except:
                 pass
-        claimed_signature = ''
+
+        claimed_signature = get_signature_path(current_user)  # auto-resolve signature path under static/signatures
+
         manager_signature = ''
+        countryhead_signature = ''
         if current_user.role == 'employee':
-            claimed_signature = f"Claimed by {current_user.username}"
+            status = 'Pending Manager Approval'
         elif current_user.role == 'manager':
-            manager_signature = f"Verified by {current_user.username}"
+            if countryhead_approval_needed:
+                status = 'Pending Countryhead Approval'
+            else:
+                status = 'Pending CEO Approval'
+
         req = Requisition(
             created_by_id=current_user.id,
             department=current_user.department,
             items_json=json.dumps(items),
             total_amount=total_amount,
-            status='Pending Manager Approval' if current_user.role == 'employee' else 'Pending CEO Approval',
+            status=status,
             claimed_signature=claimed_signature,
             manager_signature=manager_signature,
+            countryhead_signature=countryhead_signature,
             vendor_details=vendor_details,
             phone=phone,
             remarks=remarks,
-            pending_date=datetime.now(PK_TZ)
+            pending_date=datetime.now(PK_TZ),
+            countryhead_approval_needed=countryhead_approval_needed
         )
         db.session.add(req)
         db.session.commit()
         flash('Requisition created.', 'success')
         return redirect(url_for('dashboard_redirect'))
-    return render_template_string(CREATE_REQUISITION_TEMPLATE, user=current_user)
+    return render_template_string(CREATE_REQUISITION_TEMPLATE, user=current_user, claimed_signature_path=get_signature_path(current_user))
 
 @app.route('/requisition/<int:req_id>', methods=['GET', 'POST'])
 @login_required
@@ -274,68 +396,325 @@ def view_requisition(req_id):
         if not current_user.check_password(password):
             flash('Password incorrect.', 'danger')
             return redirect(url_for('view_requisition', req_id=req_id))
+
+        signature_path = get_signature_path(current_user)  # auto-resolve signature
+
         if current_user.role == 'manager' and req.status == 'Pending Manager Approval' and req.department == current_user.department:
             if action == 'approve':
-                req.status = 'Pending CEO Approval'
-                req.manager_signature = current_user.signature_filename
+                if req.countryhead_approval_needed:
+                    req.status = 'Pending Countryhead Approval'
+                else:
+                    req.status = 'Pending CEO Approval'
+                req.manager_signature = signature_path
                 req.pending_date = datetime.now(PK_TZ)
                 req.decision_date = datetime.now(PK_TZ)
             elif action == 'reject':
                 req.status = 'Rejected'
-                req.manager_signature = current_user.signature_filename
+                req.manager_signature = signature_path
                 req.decision_date = datetime.now(PK_TZ)
             db.session.commit()
             flash(f'Requisition {action}d.', 'success')
             return redirect(url_for('dashboard_manager'))
-        elif current_user.role == 'ceo' and req.status == 'Pending CEO Approval':
+
+        elif current_user.role == 'countryhead' and req.status == 'Pending Countryhead Approval':
             if action == 'approve':
-                req.status = 'Approved'
-                req.ceo_signature = current_user.signature_filename
+                req.status = 'Pending CEO Approval'
+                req.countryhead_signature = signature_path
+                req.pending_date = datetime.now(PK_TZ)
                 req.decision_date = datetime.now(PK_TZ)
             elif action == 'reject':
                 req.status = 'Rejected'
-                req.ceo_signature = current_user.signature_filename
+                req.countryhead_signature = signature_path
+                req.decision_date = datetime.now(PK_TZ)
+            db.session.commit()
+            flash(f'Requisition {action}d.', 'success')
+            return redirect(url_for('dashboard_countryhead'))
+
+        elif current_user.role == 'ceo' and req.status == 'Pending CEO Approval':
+            if action == 'approve':
+                req.status = 'Approved'
+                req.ceo_signature = signature_path
+                req.decision_date = datetime.now(PK_TZ)
+            elif action == 'reject':
+                req.status = 'Rejected'
+                req.ceo_signature = signature_path
                 req.decision_date = datetime.now(PK_TZ)
             db.session.commit()
             flash(f'Requisition {action}d.', 'success')
             return redirect(url_for('dashboard_ceo'))
+
         else:
             flash('You cannot approve/reject this requisition.', 'danger')
             return redirect(url_for('dashboard_redirect'))
+
     items = json.loads(req.items_json)
     return render_template_string(VIEW_REQUISITION_TEMPLATE, user=current_user, req=req, items=items, enumerate=enumerate)
-
+  
 # Templates (full content)
 
 LOGIN_TEMPLATE = """
 <!doctype html>
 <html lang="en">
 <head>
-  <title>Login - Together Requisition</title>
+  <title>Login - TOGETHER Requisition</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+
+  <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&display=swap" rel="stylesheet">
+
+  <style>
+    :root {
+      --brand: #0ea5e9;
+      --brand-dark: #0284c7;
+      --brand-light: #e0f2fe;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: 'Poppins', system-ui, -apple-system, Segoe UI, Roboto, 'Helvetica Neue', Arial, 'Noto Sans', 'Apple Color Emoji', 'Segoe UI Emoji', 'Segoe UI Symbol', 'Noto Color Emoji', sans-serif;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      background: radial-gradient(1200px 600px at 85% -20%, rgba(14,165,233,0.15), transparent 60%),
+                  radial-gradient(1000px 500px at -10% 120%, rgba(99,102,241,0.12), transparent 60%),
+                  linear-gradient(135deg, #f8fbff 0%, #f2fbff 60%, #eef7ff 100%);
+    }
+
+    .auth-wrap {
+      width: min(980px, 96vw);
+      display: grid;
+      grid-template-columns: 1.15fr 1fr;
+      gap: 0;
+      border-radius: 18px;
+      overflow: hidden;
+      box-shadow: 0 20px 60px rgba(2,132,199,0.18);
+      background: #fff;
+      border: 1px solid rgba(2,132,199,0.08);
+    }
+
+    .brand-panel {
+      background: linear-gradient(135deg, var(--brand) 0%, #38bdf8 60%, #22d3ee 100%);
+      color: #fff;
+      padding: 40px 34px;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      position: relative;
+      overflow: hidden;
+    }
+    .brand-panel::before,
+    .brand-panel::after {
+      content: '';
+      position: absolute;
+      border-radius: 50%;
+      filter: blur(40px);
+      opacity: 0.25;
+      pointer-events: none;
+    }
+    .brand-panel::before {
+      width: 380px; height: 380px;
+      background: #ffffff;
+      top: -90px; right: -120px;
+    }
+    .brand-panel::after {
+      width: 300px; height: 300px;
+      background: #0ea5e9;
+      bottom: -80px; left: -80px;
+      opacity: 0.18;
+    }
+    .brand-head {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+    }
+    .brand-logo {
+      background: rgba(255,255,255,0.18);
+      backdrop-filter: blur(6px);
+      border-radius: 12px;
+      padding: 10px 14px;
+      display: inline-flex;
+      align-items: center;
+      box-shadow: inset 0 0 0 1px rgba(255,255,255,0.2);
+    }
+    .brand-logo img {
+      height: 56px;
+      width: auto;
+      display: block;
+    }
+    .brand-title h1 {
+      font-weight: 700;
+      margin: 0;
+      letter-spacing: 0.5px;
+      font-size: 28px;
+    }
+    .brand-title small {
+      display: block;
+      opacity: 0.9;
+      margin-top: 4px;
+      font-weight: 500;
+    }
+    .brand-bullets {
+      margin-top: 28px;
+      display: grid;
+      gap: 10px;
+      font-size: 14px;
+    }
+    .brand-bullets .item {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      opacity: 0.95;
+    }
+    .brand-bullets .dot {
+      width: 8px; height: 8px; border-radius: 50%;
+      background: #fff;
+      box-shadow: 0 0 0 3px rgba(255,255,255,0.25);
+    }
+    .brand-footer {
+      font-size: 12px;
+      opacity: 0.85;
+    }
+
+    .form-panel {
+      padding: 40px 34px;
+      background: #ffffff;
+    }
+    .form-card {
+      background: #ffffff;
+      border: 1px solid rgba(2,132,199,0.08);
+      border-radius: 14px;
+      padding: 26px 24px;
+      box-shadow: 0 10px 30px rgba(2,132,199,0.06);
+    }
+    .form-card h2 {
+      font-weight: 700;
+      font-size: 24px;
+      margin: 0 0 8px 0;
+      letter-spacing: 0.2px;
+      color: #0f172a;
+    }
+    .subtitle {
+      color: #334155;
+      opacity: 0.85;
+      font-size: 14px;
+      margin-bottom: 18px;
+    }
+
+    .form-label {
+      font-weight: 600;
+      color: #0f172a;
+    }
+    .form-control {
+      border-radius: 10px;
+      padding: 10px 12px;
+      border: 1px solid rgba(2,132,199,0.24);
+    }
+    .form-control:focus {
+      border-color: var(--brand);
+      box-shadow: 0 0 0 .2rem rgba(14,165,233,.15);
+    }
+    .btn-brand {
+      background: var(--brand);
+      border: none;
+      color: #fff;
+      border-radius: 10px;
+      padding: 10px 14px;
+      font-weight: 600;
+      transition: transform .08s ease, box-shadow .2s ease, background .2s ease;
+      box-shadow: 0 8px 18px rgba(14,165,233,0.25);
+    }
+    .btn-brand:hover { background: var(--brand-dark); transform: translateY(-1px); }
+    .btn-brand:active { transform: translateY(0); }
+
+    .alerts { margin-bottom: 12px; }
+    .alert {
+      border-radius: 10px;
+      padding: 10px 12px;
+    }
+
+    @media (max-width: 900px) {
+      .auth-wrap {
+        grid-template-columns: 1fr;
+        width: min(560px, 94vw);
+      }
+      .brand-panel {
+        padding: 26px 24px;
+      }
+      .form-panel {
+        padding: 26px 24px;
+      }
+      .brand-title h1 { font-size: 24px; }
+      .brand-logo img { height: 48px; }
+    }
+  </style>
 </head>
 <body>
-<div class="container mt-5" style="max-width: 400px;">
-  <h2 class="mb-4">Login</h2>
-  {% with messages = get_flashed_messages(with_categories=true) %}
-    {% if messages %}
-      {% for category, message in messages %}
-        <div class="alert alert-{{ category }}">{{ message }}</div>
-      {% endfor %}
-    {% endif %}
-  {% endwith %}
-  <form method="POST">
-    <div class="mb-3">
-      <label for="username" class="form-label">Username</label>
-      <input type="text" class="form-control" id="username" name="username" required autofocus>
+  <div class="auth-wrap">
+    <!-- Brand / Left -->
+    <div class="brand-panel">
+      <div>
+        <div class="brand-head">
+          <span class="brand-logo">
+            <img src="{{ url_for('static', filename='logo.png') }}" alt="TOGETHER Logo">
+          </span>
+          <div class="brand-title">
+            <h1>TOGETHER</h1>
+            <small>Requisition System</small>
+          </div>
+        </div>
+
+        <div class="brand-bullets">
+          <div class="item"><span class="dot"></span> Secure approvals workflow</div>
+          <div class="item"><span class="dot"></span> Fast, simple, and reliable</div>
+          <div class="item"><span class="dot"></span> Designed for Our team</div>
+        </div>
+      </div>
+      <div class="brand-footer">
+        © <span id="year"></span> Muneeb. All rights reserved.
+      </div>
     </div>
-    <div class="mb-3">
-      <label for="password" class="form-label">Password</label>
-      <input type="password" class="form-control" id="password" name="password" required>
+
+    <!-- Form / Right -->
+    <div class="form-panel">
+      <div class="form-card">
+        <h2>Welcome back</h2>
+        <div class="subtitle">Sign in to continue</div>
+
+        <div class="alerts">
+          {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+              {% for category, message in messages %}
+                <div class="alert alert-{{ category }}">{{ message }}</div>
+              {% endfor %}
+            {% endif %}
+          {% endwith %}
+        </div>
+
+        <form method="POST" autocomplete="off" novalidate>
+          <div class="mb-3">
+            <label for="username" class="form-label">Username</label>
+            <input type="text" class="form-control" id="username" name="username" required autofocus>
+          </div>
+          <div class="mb-3">
+            <label for="password" class="form-label">Password</label>
+            <input type="password" class="form-control" id="password" name="password" required>
+          </div>
+          <button type="submit" class="btn btn-brand w-100">Login</button>
+        </form>
+      </div>
+      <div class="text-center mt-3" style="color:#475569; font-size:12px;">
+        Need help? Contact Developer (muneeb@together.com.pk)
+      </div>
     </div>
-    <button type="submit" class="btn btn-primary w-100">Login</button>
-  </form>
-</div>
+  </div>
+
+  <script>
+    // Set current year in footer
+    (function(){
+      var el = document.getElementById('year');
+      if (el) el.textContent = new Date().getFullYear();
+    })();
+  </script>
 </body>
 </html>
 """
@@ -359,11 +738,17 @@ CREATE_REQUISITION_TEMPLATE = """
       padding: 10px;
       min-height: 100px;
       position: relative;
+      text-align: center;
     }
     .signature-label {
       font-weight: bold;
       margin-bottom: 8px;
       display: block;
+    }
+    .signature-img {
+      max-height: 100px;
+      max-width: 100%;
+      object-fit: contain;
     }
     .total-amount-container {
       display: flex;
@@ -430,6 +815,17 @@ CREATE_REQUISITION_TEMPLATE = """
     }
     window.onload = function() {
       addItemRow();
+      const checkbox = document.getElementById('countryhead_approval_needed');
+      if (checkbox) {
+        checkbox.addEventListener('change', function() {
+          const label = document.getElementById('manager_signature_label');
+          if (this.checked) {
+            label.textContent = 'Countryhead Signature';
+          } else {
+            label.textContent = 'Verify/Manager Signature';
+          }
+        });
+      }
     }
   </script>
 </head>
@@ -468,18 +864,29 @@ CREATE_REQUISITION_TEMPLATE = """
     </table>
     <button type="button" class="btn btn-secondary mb-3" onclick="addItemRow()">+ Add More Row</button>
 
+    {% if user.role == 'manager' %}
+    <div class="form-check mb-3">
+      <input class="form-check-input" type="checkbox" id="countryhead_approval_needed" name="countryhead_approval_needed">
+      <label class="form-check-label" for="countryhead_approval_needed">
+        Countryhead approval needed before CEO approval
+      </label>
+    </div>
+    {% endif %}
+
     <div class="signatures-container">
       <div class="signature-block">
-        <label class="signature-label" for="claimed_signature">Claimed By Signature</label>
-        <textarea id="claimed_signature" name="claimed_signature" class="form-control" rows="3" readonly>Claimed by {{ user.username }}</textarea>
+        <label class="signature-label">Claimed By Signature</label>
+        {% if claimed_signature_path %}
+          <img src="{{ url_for('static', filename=claimed_signature_path) }}" alt="Claimed Signature" class="signature-img">
+        {% endif %}
       </div>
       <div class="signature-block">
-        <label class="signature-label" for="manager_signature">Verify/Manager Signature</label>
-        <textarea id="manager_signature" name="manager_signature" class="form-control" rows="3" readonly></textarea>
+        <label class="signature-label" id="manager_signature_label">Verify/Manager Signature</label>
+        <!-- Image will appear after approval in the requisition view -->
       </div>
       <div class="signature-block">
-        <label class="signature-label" for="ceo_signature">CEO Signature</label>
-        <textarea id="ceo_signature" name="ceo_signature" class="form-control" rows="3" readonly></textarea>
+        <label class="signature-label">CEO Signature</label>
+        <!-- Image will appear after CEO approval in the requisition view -->
       </div>
     </div>
 
@@ -673,6 +1080,135 @@ MANAGER_DASHBOARD_TEMPLATE = """
 </html>
 """
 
+COUNTRYHEAD_DASHBOARD_TEMPLATE = """
+<!doctype html>
+<html lang="en">
+<head>
+  <title>Countryhead Dashboard - Together Requisition</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+  <style>
+    .badge {
+      font-size: 0.9em;
+    }
+  </style>
+</head>
+<body>
+<nav class="navbar navbar-expand-lg navbar-dark bg-info">
+  <div class="container-fluid">
+    <a class="navbar-brand" href="{{ url_for('dashboard_countryhead') }}">Together Requisition</a>
+    <div class="d-flex">
+      <span class="navbar-text me-3">Logged in as {{ user.username }} (Countryhead)</span>
+      <a href="{{ url_for('countryhead_previous_requisitions') }}" class="btn btn-info me-2">Previous Requisitions</a>
+      <a href="{{ url_for('logout') }}" class="btn btn-outline-light">Logout</a>
+    </div>
+  </div>
+</nav>
+<div class="container mt-4">
+  <h3>Requisitions Pending Your Approval</h3>
+  {% with messages = get_flashed_messages(with_categories=true) %}
+    {% if messages %}
+      {% for category, message in messages %}
+        <div class="alert alert-{{category}}">{{ message }}</div>
+      {% endfor %}
+    {% endif %}
+  {% endwith %}
+  {% if pending_reqs %}
+  <table class="table table-bordered table-hover">
+    <thead class="table-light">
+      <tr>
+        <th>Department</th>
+        <th>Employee</th>
+        <th>Total Amount</th>
+        <th>Status</th>
+        <th>Date</th>
+        <th>View</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for r in pending_reqs %}
+      <tr>
+        <td>{{ r.department }}</td>
+        <td>{{ r.created_by.username }}</td>
+        <td>{{ "%.2f"|format(r.total_amount) }}</td>
+        <td><span class="badge bg-info text-dark">{{ r.status }}</span></td>
+        <td>
+          <div><strong>Pending:</strong> {{ r.pending_date.strftime('%d/%m/%Y %H:%M') if r.pending_date else '-' }}</div>
+          <div><strong>Decision:</strong> {{ r.decision_date.strftime('%d/%m/%Y %H:%M') if r.decision_date else '-' }}</div>
+        </td>
+        <td><a href="{{ url_for('view_requisition', req_id=r.id) }}" class="btn btn-primary btn-sm">View</a></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p>No requisitions pending approval.</p>
+  {% endif %}
+</div>
+</body>
+</html>
+"""
+
+COUNTRYHEAD_PREVIOUS_REQUISITIONS_TEMPLATE = """
+<!doctype html>
+<html lang="en">
+<head>
+  <title>Countryhead Previous Requisitions - Together Requisition</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+</head>
+<body>
+<nav class="navbar navbar-expand-lg navbar-dark bg-info">
+  <div class="container-fluid">
+    <a class="navbar-brand" href="{{ url_for('dashboard_countryhead') }}">Together Requisition</a>
+    <div class="d-flex">
+      <span class="navbar-text me-3">Logged in as {{ user.username }} (Countryhead)</span>
+      <a href="{{ url_for('dashboard_countryhead') }}" class="btn btn-secondary me-2">Dashboard</a>
+      <a href="{{ url_for('logout') }}" class="btn btn-outline-light">Logout</a>
+    </div>
+  </div>
+</nav>
+<div class="container mt-4">
+  <h3>Previous Requisitions (Approved/Rejected)</h3>
+  {% if requisitions %}
+  <table class="table table-bordered table-hover">
+    <thead class="table-light">
+      <tr>
+        <th>ID</th>
+        <th>Department</th>
+        <th>Employee</th>
+        <th>Status</th>
+        <th>Total Amount</th>
+        <th>Created At</th>
+        <th>View</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for r in requisitions %}
+      <tr>
+        <td>{{ r.id }}</td>
+        <td>{{ r.department }}</td>
+        <td>{{ r.created_by.username }}</td>
+        <td>
+          {% if r.status == 'Approved' %}
+            <span class="badge bg-success">{{ r.status }}</span>
+          {% else %}
+            <span class="badge bg-danger">{{ r.status }}</span>
+          {% endif %}
+        </td>
+        <td>{{ "%.2f"|format(r.total_amount) }}</td>
+        <td>{{ format_datetime_pk(r.created_at) }}</td>
+        <td><a href="{{ url_for('view_requisition', req_id=r.id) }}" class="btn btn-primary btn-sm">View</a></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p>No previous requisitions found.</p>
+  {% endif %}
+</div>
+</body>
+</html>
+"""
+
 CEO_DASHBOARD_TEMPLATE = """
 <!doctype html>
 <html lang="en">
@@ -779,6 +1315,70 @@ CEO_DASHBOARD_TEMPLATE = """
 </body>
 </html>
 """
+
+SUPERADMIN_REQUISITIONS_TEMPLATE = """
+<!doctype html>
+<html lang="en">
+<head>
+  <title>All Requisitions - Superadmin - Together Requisition</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+</head>
+<body>
+<nav class="navbar navbar-expand-lg navbar-dark bg-info">
+  <div class="container-fluid">
+    <a class="navbar-brand" href="{{ url_for('dashboard_superadmin') }}">Together Requisition</a>
+    <div class="d-flex">
+      <span class="navbar-text me-3">Logged in as {{ user.username }} (Superadmin)</span>
+      <a href="{{ url_for('dashboard_superadmin') }}" class="btn btn-secondary me-2">Dashboard</a>
+      <a href="{{ url_for('logout') }}" class="btn btn-outline-light">Logout</a>
+    </div>
+  </div>
+</nav>
+<div class="container mt-4">
+  <h3>All Requisitions</h3>
+  {% if requisitions %}
+  <table class="table table-bordered table-hover">
+    <thead class="table-light">
+      <tr>
+        <th>ID</th>
+        <th>Created By</th>
+        <th>Department</th>
+        <th>Total Amount</th>
+        <th>Status</th>
+        <th>Created At</th>
+        <th>View</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for r in requisitions %}
+      <tr>
+        <td>{{ r.id }}</td>
+        <td>{{ r.created_by.username }}</td>
+        <td>{{ r.department }}</td>
+        <td>{{ "%.2f"|format(r.total_amount) }}</td>
+        <td>
+          {% if r.status == 'Approved' %}
+            <span class="badge bg-success">{{ r.status }}</span>
+          {% elif r.status == 'Rejected' %}
+            <span class="badge bg-danger">{{ r.status }}</span>
+          {% else %}
+            <span class="badge bg-warning text-dark">{{ r.status }}</span>
+          {% endif %}
+        </td>
+        <td>{{ r.created_at.strftime('%d/%m/%Y %H:%M') }}</td>
+        <td><a href="{{ url_for('view_requisition', req_id=r.id) }}" class="btn btn-primary btn-sm">View</a></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p>No requisitions found.</p>
+  {% endif %}
+</div>
+</body>
+</html>
+"""
+
 SUPERADMIN_DASHBOARD_TEMPLATE = """
 <!doctype html>
 <html lang="en">
@@ -828,6 +1428,7 @@ SUPERADMIN_DASHBOARD_TEMPLATE = """
           <option value="" disabled selected>Select Role</option>
           <option value="employee">Employee</option>
           <option value="manager">Manager</option>
+          <option value="countryhead">Countryhead</option>
           <option value="ceo">CEO</option>
           <option value="superadmin">Superadmin</option>
         </select>
@@ -980,7 +1581,7 @@ PREVIOUS_REQUISITIONS_TEMPLATE = """
   </div>
 </nav>
 <div class="container mt-4">
-  <h3>Previous Requisitions</h3>
+  <h3>Previous Requisitions (Approved/Rejected)</h3>
   {% if requisitions %}
   <table class="table table-bordered table-hover">
     <thead class="table-light">
@@ -1021,7 +1622,6 @@ PREVIOUS_REQUISITIONS_TEMPLATE = """
 </body>
 </html>
 """
-
 VIEW_REQUISITION_TEMPLATE = """
 <!doctype html>
 <html lang="en">
@@ -1045,11 +1645,17 @@ VIEW_REQUISITION_TEMPLATE = """
       padding: 10px;
       min-height: 100px;
       position: relative;
+      text-align: center;
     }
     .signature-label {
       font-weight: bold;
       margin-bottom: 8px;
       display: block;
+    }
+    .signature-img {
+      max-height: 100px;
+      max-width: 100%;
+      object-fit: contain;
     }
     .approval-form input[type="password"] {
       margin-bottom: 10px;
@@ -1104,23 +1710,33 @@ VIEW_REQUISITION_TEMPLATE = """
 
   <div class="signatures-container">
     <div class="signature-block">
-      <label class="signature-label" for="claimed_signature">Claimed By Signature</label>
-      <textarea id="claimed_signature" name="claimed_signature" class="form-control" rows="3" readonly>{{ req.claimed_signature or '-' }}</textarea>
-    </div>
-    <div class="signature-block">
-      <label class="signature-label" for="manager_signature">Manager Signature</label>
-      {% if req.manager_signature %}
-        <img src="{{ url_for('static', filename=req.manager_signature) }}" alt="Manager Signature" class="signature-img" style="max-height: 100px;">
-      {% else %}
-        <textarea id="manager_signature" name="manager_signature" class="form-control" rows="3" readonly></textarea>
+      <label class="signature-label">Claimed By Signature</label>
+      {% if req.claimed_signature %}
+        <img src="{{ url_for('static', filename=req.claimed_signature) }}" alt="Claimed Signature" class="signature-img">
       {% endif %}
     </div>
     <div class="signature-block">
-      <label class="signature-label" for="ceo_signature">CEO Signature</label>
-      {% if req.ceo_signature %}
-        <img src="{{ url_for('static', filename=req.ceo_signature) }}" alt="CEO Signature" class="signature-img" style="max-height: 100px;">
+      <label class="signature-label">
+        {% if req.countryhead_approval_needed %}
+          Countryhead Signature
+        {% else %}
+          Manager Signature
+        {% endif %}
+      </label>
+      {% if req.countryhead_approval_needed %}
+        {% if req.countryhead_signature %}
+          <img src="{{ url_for('static', filename=req.countryhead_signature) }}" alt="Countryhead Signature" class="signature-img">
+        {% endif %}
       {% else %}
-        <textarea id="ceo_signature" name="ceo_signature" class="form-control" rows="3" readonly></textarea>
+        {% if req.manager_signature %}
+          <img src="{{ url_for('static', filename=req.manager_signature) }}" alt="Manager Signature" class="signature-img">
+        {% endif %}
+      {% endif %}
+    </div>
+    <div class="signature-block">
+      <label class="signature-label">CEO Signature</label>
+      {% if req.ceo_signature %}
+        <img src="{{ url_for('static', filename=req.ceo_signature) }}" alt="CEO Signature" class="signature-img">
       {% endif %}
     </div>
   </div>
@@ -1142,6 +1758,7 @@ VIEW_REQUISITION_TEMPLATE = """
   </div>
 
   {% if (user.role == 'manager' and req.status == 'Pending Manager Approval' and req.department == user.department) or
+        (user.role == 'countryhead' and req.status == 'Pending Countryhead Approval') or
         (user.role == 'ceo' and req.status == 'Pending CEO Approval') %}
   <form method="POST" class="approval-form mb-3">
     <input type="password" name="password" class="form-control" placeholder="Confirm Password" required>
@@ -1151,69 +1768,6 @@ VIEW_REQUISITION_TEMPLATE = """
   {% endif %}
 
   <button class="btn btn-secondary" onclick="window.print()">Print / Save as PDF</button>
-</div>
-</body>
-</html>
-"""
-
-SUPERADMIN_REQUISITIONS_TEMPLATE = """
-<!doctype html>
-<html lang="en">
-<head>
-  <title>All Requisitions - Superadmin - Together Requisition</title>
-  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-</head>
-<body>
-<nav class="navbar navbar-expand-lg navbar-dark bg-info">
-  <div class="container-fluid">
-    <a class="navbar-brand" href="{{ url_for('dashboard_superadmin') }}">Together Requisition</a>
-    <div class="d-flex">
-      <span class="navbar-text me-3">Logged in as {{ user.username }} (Superadmin)</span>
-      <a href="{{ url_for('dashboard_superadmin') }}" class="btn btn-secondary me-2">Dashboard</a>
-      <a href="{{ url_for('logout') }}" class="btn btn-outline-light">Logout</a>
-    </div>
-  </div>
-</nav>
-<div class="container mt-4">
-  <h3>All Requisitions</h3>
-  {% if requisitions %}
-  <table class="table table-bordered table-hover">
-    <thead class="table-light">
-      <tr>
-        <th>ID</th>
-        <th>Created By</th>
-        <th>Department</th>
-        <th>Total Amount</th>
-        <th>Status</th>
-        <th>Created At</th>
-        <th>View</th>
-      </tr>
-    </thead>
-    <tbody>
-      {% for r in requisitions %}
-      <tr>
-        <td>{{ r.id }}</td>
-        <td>{{ r.created_by.username }}</td>
-        <td>{{ r.department }}</td>
-        <td>{{ "%.2f"|format(r.total_amount) }}</td>
-        <td>
-          {% if r.status == 'Approved' %}
-            <span class="badge bg-success">{{ r.status }}</span>
-          {% elif r.status == 'Rejected' %}
-            <span class="badge bg-danger">{{ r.status }}</span>
-          {% else %}
-            <span class="badge bg-warning text-dark">{{ r.status }}</span>
-          {% endif %}
-        </td>
-        <td>{{ r.created_at.strftime('%d/%m/%Y %H:%M') }}</td>
-        <td><a href="{{ url_for('view_requisition', req_id=r.id) }}" class="btn btn-primary btn-sm">View</a></td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
-  {% else %}
-  <p>No requisitions found.</p>
-  {% endif %}
 </div>
 </body>
 </html>
